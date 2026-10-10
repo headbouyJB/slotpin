@@ -2,6 +2,10 @@
 
 `slotpin` is a slot-pinning, cache-aware reverse proxy for a local LLM inference server (llama.cpp's `llama-server`, or the Gufo engine), plus a read-only dashboard. It keeps interactive conversations warm so a returning user is not hit with a long cold prefill, and it records a per-turn metric stream (speed, latency, cache behaviour, memory, optionally energy).
 
+![The slotpin dashboard on the 24 h window: live slots, four card groups and the recent-requests list](docs/img/dashboard.png)
+
+*The dashboard on synthetic demo data from `tools/demo_dashboard.py`. Charts and the phone layout are in [docs/dashboard.md](docs/dashboard.md).*
+
 ## What it does
 
 - **Slot pinning.** Sets `id_slot` on each request so a conversation lands in the KV slot that already holds it.
@@ -60,6 +64,16 @@ slotpin-dash
 ```
 
 Open `http://127.0.0.1:8091`. It shows whether the proxy and upstream are up, slot occupancy, throughput and time to first token, warm and cold rates, queue waits, GPU and host memory, temperatures, and optionally power and energy, live and over 1 hour, 24 hours, 72 hours and 7 days, with a request list. It never writes to the proxy's data and never serves prompt text. The variable list is in [docs/configuration.md](docs/configuration.md#dashboard-environment-variables); details are in [docs/dashboard.md](docs/dashboard.md).
+
+## Try the dashboard with demo data
+
+To see the dashboard without a server or a proxy, run the demo tool from a checkout:
+
+```
+python tools/demo_dashboard.py
+```
+
+It prints a URL (`http://127.0.0.1:8099/` by default). Everything runs on loopback: a fake upstream with four slots, a fake energy feed, seven days of invented `metrics.jsonl` and history (including one restart and one stall), and the real dashboard reading them. Nothing is read from your machine, so it looks the same on macOS and Linux. Stop it with Ctrl-C; `--seed`, `--port` and `--once-seconds N` are the useful flags. `tools/capture_screenshots.py` regenerates the images in `docs/img` from it with headless Chrome.
 
 ## Durable install (systemd)
 

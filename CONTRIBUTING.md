@@ -64,6 +64,14 @@ install it before changing the page script.
   hostnames or personal paths anywhere in the tree. Use documentation
   addresses (`192.0.2.x`) and `example.com` in docs, examples and tests.
 
+## Seeing the dashboard with demo data
+
+`python tools/demo_dashboard.py` starts the dashboard on invented data (fake
+upstream, fake energy feed, seven days of synthetic metrics) on 127.0.0.1, with
+no server needed; use it when changing the page. `python tools/capture_screenshots.py`
+regenerates `docs/img/*.png` from it using headless Chrome. Both are stdlib-only
+dev tools and everything they show is invented (the guard test covers them).
+
 ## Adding a config key
 
 1. Add the field (with a default and a short comment) to the `Config`

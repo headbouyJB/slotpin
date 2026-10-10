@@ -12,6 +12,14 @@ Each dashboard instance watches one box; an optional header nav (`DASH_BOXES`)
 cross-links the dashboards of other boxes so you can click between them. With
 `DASH_BOXES` empty (the default) there is no box switcher.
 
+![Dashboard with the Performance and Cache charts expanded](img/dashboard-charts.png)
+
+*Performance and Cache groups expanded on the 24 h window, with restart and stall markers. Demo data from `tools/demo_dashboard.py`.*
+
+On a phone the groups collapse to one-line summaries and the slot tiles sit two per row:
+
+![Dashboard on a 390 px wide phone](img/dashboard-phone.png)
+
 ## Running it
 
 Install with `sudo ./deploy/install.sh --config config.example.toml --user <service-user> --enable --dash`
