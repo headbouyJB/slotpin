@@ -2329,6 +2329,7 @@ main{padding:18px 20px;max-width:1200px;margin:0 auto}
 .ghead .gname{font-size:12px;text-transform:uppercase;letter-spacing:1px}
 .ghead .gsum{display:none}
 .ghead .gcar{font-size:11px}
+.sum-warn{color:var(--warm)}.sum-crit{color:var(--bad)}
 .ghead .ghint{font-size:11px;color:var(--dim);opacity:.7}
 .ghead:hover .gname,.ghead:hover .ghint{color:var(--fg)}
 .grp:not(.open) .chs{display:none}
@@ -2337,6 +2338,7 @@ main{padding:18px 20px;max-width:1200px;margin:0 auto}
 @media(max-width:640px){
  .ghead{padding:9px 12px;margin:0 0 8px;background:var(--panel);border:1px solid var(--line);border-radius:10px}
  .grp.tog .ghead{cursor:pointer}
+ .ghead{gap:8px}.ghead .gname{letter-spacing:.5px}
  .ghead .gsum{display:inline;color:var(--fg);font-size:12px;flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
  .ghead .ghint{display:none}
  .grp.tog:not(.open) .grid,.grp.tog:not(.open) .chs{display:none}
@@ -2348,11 +2350,11 @@ h2{font-size:12px;text-transform:uppercase;letter-spacing:1px;color:var(--dim);m
 .slots{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px;margin-bottom:22px}
 .slot{min-width:0;background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px 16px;position:relative;overflow:hidden}
 @media(max-width:900px){.slots{grid-template-columns:repeat(2,minmax(0,1fr))}}
-@media(max-width:640px){.slots{gap:10px}.slots:not(.multi){grid-template-columns:minmax(0,1fr)}.slots.multi .slot{padding:10px 12px}}
+@media(max-width:640px){.slots.multi .slot .st{font-size:16px}.slots.multi .slot .ph{font-size:12px}.slots.multi .slot .meta{font-size:11px}.slots{gap:10px}.slots:not(.multi){grid-template-columns:minmax(0,1fr)}.slots.multi .slot{padding:10px 12px}}
 .slot .id{font-size:12px;color:var(--dim)}.slot .st{font-size:20px;font-weight:600;margin:6px 0}
 .slot.busy{border-color:var(--busy)}.slot.busy .st{color:var(--busy)}.slot.idle .st{color:var(--dim)}
 .slot .meta{font-size:12px;color:var(--dim)}
-.slot .ph{font-size:13px;margin:2px 0}
+.slot .ph{font-size:13px;margin:2px 0}.slot .st,.nw{white-space:nowrap}
 .slot.busy.warn{border-color:var(--warm)}.slot.busy.warn .st{color:var(--warm)}.slot.busy.warn .bar{background:var(--warm)}
 .slot.busy.crit{border-color:var(--bad)}.slot.busy.crit .st{color:var(--bad)}.slot.busy.crit .bar{background:var(--bad)}
 .slot .bar{position:absolute;left:0;bottom:0;height:3px;background:var(--busy)}
@@ -2403,6 +2405,18 @@ tr.x-miss td{background:rgba(74,123,216,.14)}
 tr.x-slow td{background:rgba(255,180,84,.12)}
 tr.trow:hover td{filter:brightness(1.25)}
 tr.det td{text-align:left;white-space:normal;background:var(--panel2)}
+@media(max-width:640px){
+ main{padding:14px 12px}header{padding:12px}
+ th,td{padding:5px 4px;font-size:11.5px}
+ th{font-size:9px;letter-spacing:.2px;white-space:normal;line-height:1.1;vertical-align:bottom}
+ th:first-child,td:first-child{padding-left:8px}
+ .ctag{margin-left:3px;padding:0 3px;font-size:9.5px}
+ table{table-layout:fixed;width:720px}
+ td{overflow:hidden;text-overflow:ellipsis}
+ th:nth-child(1){width:120px}th:nth-child(2){width:44px}th:nth-child(3){width:44px}th:nth-child(4){width:44px}th:nth-child(5){width:54px}th:nth-child(6){width:42px}
+ th:nth-child(n+7){width:60px}
+ tr.det td{padding:8px}
+}
 .dgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:6px 18px;font-size:12px}
 .dgrid span{color:var(--dim)}
 .ctag{display:inline-block;margin-left:6px;padding:0 5px;border:1px solid currentColor;border-radius:5px;font-size:10.5px;line-height:15px;vertical-align:middle}
@@ -2522,7 +2536,7 @@ function tlRow(r){
   if(failed) status='<span class="err">failed · '+esc(r.fail_reason||'unknown')+(r.upstream_status!=null?(' · '+esc(r.upstream_status)):'')+'</span>';
   else status=esc(r.served||'ok');
   const acc=(r.draft_n>0&&r.draft_n_accepted!=null)?(100*r.draft_n_accepted/r.draft_n).toFixed(0)+'%':'—';
-  let h=`<tr class="trow ${cls}" data-k="${esc(k)}"><td>${esc(fstamp(r.ts))}${tag}</td><td>${esc(r.route||'—')}</td><td>${status}</td><td>${esc(fnum(r.dur_s,1))}</td><td>${esc(r.queue_wait_ms==null?'—':fnum(r.queue_wait_ms,0)+' ms')}</td><td>${esc(fnum(r.ttft_s,2))}</td><td>${esc(fint(r.new_tokens))}</td><td>${esc(fnum(r.cached_pct,0))}</td><td>${esc(fint(r.completion_n))}</td><td>${esc(fnum(r.decode_tps,1))}</td><td>${esc(acc)}</td><td class="mono">${esc(r.stop_reason||'—')}</td></tr>`;
+  let h=`<tr class="trow ${cls}" data-k="${esc(k)}"><td>${esc(fstamp(r.ts))}${tag}</td><td class="rt" title="${esc(r.route||'')}">${esc(r.route||'—')}</td><td title="${esc(failed?('failed · '+(r.fail_reason||'unknown')):(r.served||'ok'))}">${status}</td><td>${esc(fnum(r.dur_s,1))}</td><td>${esc(r.queue_wait_ms==null?'—':fnum(r.queue_wait_ms,0)+' ms')}</td><td>${esc(fnum(r.ttft_s,2))}</td><td>${esc(fint(r.new_tokens))}</td><td>${esc(fnum(r.cached_pct,0))}</td><td>${esc(fint(r.completion_n))}</td><td>${esc(fnum(r.decode_tps,1))}</td><td>${esc(acc)}</td><td class="mono">${esc(r.stop_reason||'—')}</td></tr>`;
   if(tl.exp===k) h+=`<tr class="det"><td colspan="12">${tlDetail(r)}</td></tr>`;
   return h;
 }
@@ -2626,10 +2640,20 @@ function mkChart(o,ctx){
       g+=`<path d="${b.pts.map(p=>{const x=cx(p,b.w);return 'M'+(x-bw/2).toFixed(1)+' '+base+'V'+Y(p.v).toFixed(1)+'h'+bw.toFixed(1)+'V'+base+'Z';}).join('')}" fill="${b.col}" fill-opacity=".85"/>`;}
     o.barw=bw;
   }
+  const downs=ctx.mk.filter(m=>m.kind==='down').map(m=>m.t), maxGap=(tmax-tmin)/6;
   (o.lines||[]).forEach(s=>{
-    const dots=[];let band='',line='',whisk='';
-    runsOf(s.pts,s.w).forEach(run=>{
+    const dots=[];let band='',line='',whisk='',conn='';
+    const runs=runsOf(s.pts,s.w), sparse=s.pts.length<0.4*((tmax-tmin)/s.w);
+    // faint connector across empty buckets, but not over a gap longer than a sixth of the window
+    // or one that contains an upstream `down` event
+    for(let i=1;i<runs.length;i++){
+      const a=runs[i-1][runs[i-1].length-1], b=runs[i][0];
+      if(b.t-a.t>maxGap||downs.some(t=>t>=a.t&&t<=b.t+s.w))continue;
+      conn+='M'+cx(a,s.w).toFixed(1)+' '+Y(a.v).toFixed(1)+'L'+cx(b,s.w).toFixed(1)+' '+Y(b.v).toFixed(1);
+    }
+    runs.forEach(run=>{
       any=true;
+      if(sparse&&run.length>1)run.forEach(p=>dots.push([cx(p,s.w),Y(p.v)]));
       if(run.length<2){const p=run[0],x=cx(p,s.w);dots.push([x,Y(p.v)]);
         if(s.band&&p.v2!=null&&p.v2>p.v)whisk+='M'+x.toFixed(1)+' '+Y(p.v2).toFixed(1)+'V'+Y(p.v).toFixed(1);return;}
       line+=run.map((p,i)=>(i?'L':'M')+cx(p,s.w).toFixed(1)+' '+Y(p.v).toFixed(1)).join('');
@@ -2639,6 +2663,7 @@ function mkChart(o,ctx){
       }
     });
     const op=s.light?'.45':'1';
+    if(conn)g+=`<path class="cn" d="${conn}" stroke="${s.col}" stroke-opacity=".3" stroke-width="1" fill="none"/>`;
     if(band)g+=`<path d="${band}" fill="${s.col}" fill-opacity=".2" stroke="none"/>`;
     if(whisk)g+=`<path d="${whisk}" stroke="${s.col}" stroke-opacity=".5" stroke-width="2" fill="none"/>`;
     if(line)g+=`<path d="${line}" stroke="${s.col}" stroke-opacity="${op}" stroke-width="1.6" fill="none" stroke-linejoin="round"/>`;
@@ -2781,13 +2806,14 @@ async function refresh(){
   $('slots').className='slots'+(arr.length>1?' multi':'');
   $('slots').innerHTML=arr.map(sl=>{const busy=slotsOk&&sl.busy;
     const pct=sl.n_ctx&&sl.n_prompt?Math.min(100,100*sl.n_prompt/sl.n_ctx):0;
-    const stt=!slotsOk?'? unknown':(busy?'● processing':'○ idle');
+    const stt=!slotsOk?'? unknown':(busy?'●\u00a0processing':'○\u00a0idle');
     let sev='';
     if(busy&&stT&&sl.stall_s!=null){ sev=sl.stall_s>=stT?' crit':(sl.stall_s>=stT/2?' warn':''); }
     let ph='';
     if(busy){
       const gen=sl.phase==='generating', tok=gen?sl.n_decoded:sl.n_processed;
-      ph=`<div class="ph">${gen?'generating':'prefill'} · ${esc(fdur(sl.busy_for_s))} · ${tok==null?'—':Number(tok).toLocaleString()} ${gen?'generated':'processed'}${sev?(' · no progress '+esc(fdur(sl.stall_s))):''}</div>`;
+      const nw=x=>`<span class="nw">${x}</span>`;
+      ph=`<div class="ph">${nw(gen?'generating':'prefill')} · ${nw(esc(fdur(sl.busy_for_s)))} · ${nw((tok==null?'—':Number(tok).toLocaleString())+' '+(gen?'generated':'processed'))}${sev?(' · '+nw('no progress '+esc(fdur(sl.stall_s)))):''}</div>`;
     }
     const meta=!slotsOk?'slots query stalled':(busy?((sl.n_prompt||0).toLocaleString()+' prompt · '+(sl.n_cache||0).toLocaleString()+' cached · task '+esc(sl.id_task)):('ctx '+((sl.n_ctx||0)/1000|0)+'k'));
     return `<div class="slot ${busy?'busy':'idle'}${sev}"><div class="id">SLOT ${esc(sl.id)}</div><div class="st">${stt}</div>${ph}<div class="meta">${meta}</div><div class="bar" style="width:${busy?Math.max(8,pct):0}%"></div></div>`;}).join('');
@@ -2885,6 +2911,8 @@ function renderCards(c, st, hi){
   const nvmeCard=(t.nvme_c!=null||hs.max_nvme_temp_c!=null)?card('NVMe temp',num(hs.max_nvme_temp_c,1),'°C','now '+esc(num(t.nvme_c,1))+'°C',tCls(t.nvme_c,hs.max_nvme_temp_c)):'';
 
   const sum=(...xs)=>xs.join(' · ');
+  // phone summary item: warning sign and the card's colour on the item that is amber or red
+  const mark=(cls,txt)=>cls?`<span class="sum-${cls}">⚠ ${txt}</span>`:txt;
   // chart titles carry the card's window value (same measure as the card)
   const wv=(x,d,u)=>(typeof x==='number'&&isFinite(x))?x.toFixed(d)+u:'—';
   const ch=chartBlocks(hi,{fail:F.count==null?'—':String(F.count),mem:wv(gb(minFree),1,' GB'),
@@ -2894,11 +2922,11 @@ function renderCards(c, st, hi){
     gpu:wv(hs.max_gpu_temp_c,1,'°C'),nvme:wv(hs.max_nvme_temp_c,1,'°C')},st);
   $('cards').innerHTML=
     grp('perf','Performance',[decCard,preCard,ttCard,rqCard,drCard,ccCard].filter(Boolean),
-        sum('decode '+esc(num(D.p50,1))+' t/s','TTFT '+esc(num(T.p50,2))+' s',''+esc(num(R.per_hour,1))+' /h'),ch.perf)+
+        sum(esc(num(D.p50,1))+' t/s','TTFT '+esc(num(T.p50,1))+' s',esc(num(R.per_hour,1))+'/h'),ch.perf)+
     grp('cache','Cache',[chCard,csCard,rsCard],
-        sum('hit '+esc(num(CH.pct,0))+'%',(CS.kind==='llamacpp'?'cold ':'missed ')+esc(num(CS.miss_pct,0))+'%','restore '+esc(num(RS.p50,0))+' ms'),ch.cache)+
+        sum('hit '+esc(num(CH.pct,0))+'%',(CS.kind==='llamacpp'?'cold ':'miss ')+esc(num(CS.miss_pct,0))+'%',esc(num(RS.p50,0))+' ms'),ch.cache)+
     grp('health','Health',[upCard,lcCard,fCard,memCard],
-        sum((up==='up'&&!lcCls&&!fCls&&!mCls?'':'⚠ ')+esc(up),(F.count==null?'—':String(F.count))+' failed',esc(num(gb(minFree),1))+' GB free'),ch.health)+
+        sum(mark(up!=='up'?'crit':lcCls,(up!=='up'||!lcCls)?esc(up):'stalled'),mark(fCls,(F.count==null?'—':String(F.count))+' failed'),mark(mCls,esc(num(gb(minFree),1))+' GB free')),ch.health)+
     grp('system','System',[gttCard,powCard,whCard,cpuCard,gpuCard,nvmeCard].filter(Boolean),
         sum('GPU mem '+esc(num(gb(hs.max_gtt_used_mb),1))+' GB',esc(num(hs.avg_power_w,0))+' W','CPU '+esc(num(hs.max_cpu_temp_c,0))+'°C'),ch.system);
 }

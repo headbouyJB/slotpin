@@ -257,7 +257,7 @@ def test_memory_card_colours_from_current_values_except_on_short_windows(tmp_pat
     assert "⚠" not in res["w86400"]
     assert _card(res["w900"], "Memory")["cls"] == "crit"
     assert _card(res["w3600"], "Memory")["cls"] == "crit"
-    assert "⚠ up" in res["w900"]
+    assert "⚠ 0.6 GB free" in res["w900"]
     assert "0.6" in _card(res["w86400"], "Memory")["big"]  # headline stays the window minimum
     low = _state(system={"mem_total_mb": 131072, "mem_free_mb": 1024, "swap_used_mb": 0})
     for w in (86400, 259200, 604800):

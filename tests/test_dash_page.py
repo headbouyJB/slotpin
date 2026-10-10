@@ -370,7 +370,8 @@ def test_chart_isolated_bucket_is_a_dot(tmp_path):
     for cid in ("decode", "ttft", "cachehit", "miss", "draft"):
         assert "<circle" in res["charts"][cid], cid
     # the same bucket with a neighbour is a line (and no dot)
-    res2 = _run_charts(tmp_path, 900, 60, 60, [only, _rq(NOW_P - 240)], [], [])
+    dense = [_rq(NOW_P - 60 * k) for k in range(2, 12)]  # 10 of 15 buckets: dense, plain line
+    res2 = _run_charts(tmp_path, 900, 60, 60, dense, [], [])
     assert "<circle" not in res2["charts"]["decode"]
     assert 'stroke-width="1.6"' in res2["charts"]["decode"]
     # a lone bucket in a stacked-area / line chart is a dot too
@@ -521,3 +522,129 @@ def test_crosshair_same_time_on_charts_in_both_columns(tmp_path):
     assert "no data" not in xs["decode"]["rd"] and "no data" not in xs["ttft"]["rd"]
     assert cols["decode"] == 0 and cols["prefill"] == 1 and cols["ttft"] == 0
     assert res["off"] is True  # leaving the charts clears every crosshair and readout
+
+
+def _decode_svg(res):
+    html = res["charts"]["decode"]
+    return html[html.index("<svg") : html.index("</svg>")]
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
+def test_sparse_series_has_faint_connector_and_dots_but_not_over_long_gap(tmp_path):
+    win, rw = 86400, 300
+    t0 = NOW_P - win
+    # runs of two adjacent buckets; gaps of 1 h between them, then one 8 h gap (> window / 6)
+    ts = [t0 + 3600, t0 + 3900, t0 + 7500, t0 + 7800, t0 + 11400, t0 + 11700, t0 + 11700 + 8 * 3600]
+    res = _run_charts(tmp_path, win, rw, rw, [_rq(t) for t in ts], [], [])
+    svg = _decode_svg(res)
+    conn = re.search(r'<path class="cn" d="([^"]+)"', svg)
+    assert conn and 'stroke-opacity=".3"' in svg
+    assert conn.group(1).count("M") == 2  # two bridged gaps; the 8 h gap is left open
+    assert svg.count("<circle") == len(ts)  # a dot on every populated bucket
+    assert 'stroke-width="1.6"' in svg  # solid segments remain where buckets are adjacent
+    assert 'fill-opacity=".2"' in svg  # p95 band stays
+    # an upstream `down` event inside a short gap stops the bridge as well
+    ev = [{"t": t0 + 5000, "kind": "down"}]
+    res2 = _run_charts(tmp_path, win, rw, rw, [_rq(t) for t in ts], [], ev)
+    conn2 = re.search(r'<path class="cn" d="([^"]+)"', _decode_svg(res2))
+    assert conn2.group(1).count("M") == 1
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
+def test_dense_series_has_no_per_point_dots_or_connector(tmp_path):
+    win, rw = 86400, 300
+    t0 = NOW_P - win
+    rs = [_rq(t0 + i * rw) for i in range(0, 288, 1) if i % 10]  # 90 % populated
+    svg = _decode_svg(_run_charts(tmp_path, win, rw, rw, rs, [], []))
+    assert "<circle" not in svg
+    assert 'stroke-width="1.6"' in svg
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
+def test_sparse_connector_node_count_bounded(tmp_path):
+    win, rw = 86400, 300
+    t0 = NOW_P - win
+    rs = [_rq(t0 + i * rw) for i in range(0, 288, 3)]  # a third populated, many dots
+    res = _run_charts(tmp_path, win, rw, rw, rs, [], [])
+    for cid in ("decode", "ttft", "cachehit"):
+        html = res["charts"][cid]
+        svg = html[html.index("<svg") : html.index("</svg>")]
+        assert len(re.findall(r"<(?:path|circle|line|rect|text|title)\b", svg)) < 150, cid
+        assert svg.count('class="cn"') == 1
+
+
+def _cards_with(tmp_path, state_patch, hist_cards, summary=None, sm=None):
+    """Render once with given card payloads; return the cards html."""
+    import json as _json
+
+    res = _run_charts(tmp_path, 900, 60, 60, [], [], [])
+    assert res  # harness sanity
+    p = tmp_path / "p.json"
+    payload = _json.loads(p.read_text())
+    payload["state"]["system"].update(state_patch.get("system", {}))
+    payload["state"]["health_v2"].update(state_patch.get("health_v2", {}))
+    payload["state"]["cards"] = hist_cards
+    payload["history"]["cards"] = hist_cards
+    payload["history"]["summary"] = summary or {}
+    p.write_text(_json.dumps(payload))
+    r = subprocess.run(
+        ["node", str(tmp_path / "h.js"), str(tmp_path / "page.js"), str(p)],
+        capture_output=True, text=True, timeout=60,
+    )
+    assert r.returncode == 0, r.stderr
+    return _json.loads(r.stdout)["cards"]
+
+
+def _gsum(cards, g):
+    m = re.search(rf'data-g="{g}".*?<span class="gsum">(.*?)</span><span class="gcar"', cards, re.S)
+    return m.group(1)
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
+def test_health_summary_marks_only_the_amber_or_red_items(tmp_path):
+    fine = {"failures": {"count": 0, "pct": 0}}
+    c = _cards_with(tmp_path, {"system": {"mem_free_mb": 30000}}, fine, {"min_mem_free_mb": 30000})
+    assert _gsum(c, "health") == "up · 0 failed · 29.3 GB free"
+    amber = {"failures": {"count": 4, "pct": 2.0}}
+    c = _cards_with(tmp_path, {"system": {"mem_free_mb": 30000}}, amber, {"min_mem_free_mb": 30000})
+    assert _gsum(c, "health") == 'up · <span class="sum-warn">⚠ 4 failed</span> · 29.3 GB free'
+    c = _cards_with(tmp_path, {"system": {"mem_free_mb": 1200}}, fine, {"min_mem_free_mb": 1200})
+    assert _gsum(c, "health") == 'up · 0 failed · <span class="sum-crit">⚠ 1.2 GB free</span>'
+    c = _cards_with(
+        tmp_path,
+        {"system": {"mem_free_mb": 30000}, "health_v2": {"last_completion_age_s": 400, "busy_slots": 1}},
+        amber,
+        {"min_mem_free_mb": 30000},
+    )
+    assert _gsum(c, "health").startswith('<span class="sum-crit">⚠ stalled</span> · ')
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
+def test_group_summaries_are_short(tmp_path):
+    cards = {
+        "decode": {"p50": 31.44},
+        "ttft": {"p50": 2.0},
+        "requests": {"per_hour": 5.0},
+        "cache_hit": {"pct": 92.0},
+        "cache_source": {"miss_pct": 4.0},
+        "restore": {"p50": 11.0},
+    }
+    c = _cards_with(tmp_path, {}, cards)
+    assert _gsum(c, "perf") == "31.4 t/s · TTFT 2.0 s · 5.0/h"
+    assert _gsum(c, "cache") == "hit 92% · miss 4% · 11 ms"
+
+
+def test_phone_css_keeps_status_together_and_table_compact():
+    html = dash.render_page()
+    js = _script(html)
+    assert re.search(r"\.slot \.st,\.nw\{white-space:nowrap\}", html)
+    assert "●\\u00a0processing" in js  # no breakable space between dot and word
+    assert "@media(max-width:640px){.slots.multi .slot .st{font-size:16px}" in html
+    narrow = html[html.index("@media(max-width:640px){\n main{"):]
+    narrow = narrow[: narrow.index("\n}")]
+    assert "table-layout:fixed" in narrow and "th:nth-child(1){width:" in narrow
+    widths = [int(w) for w in re.findall(r"th:nth-child\([1-6]\)\{width:(\d+)px", narrow)]
+    assert len(widths) == 6 and sum(widths) <= 350  # time..TTFT fit a 390 px phone
+    assert "text-overflow:ellipsis" in narrow
+    assert 'class="rt" title="${esc(r.route' in js  # full route kept, escaped, in the title
+    assert "ctag" in narrow  # tag stays beside the time, just tighter

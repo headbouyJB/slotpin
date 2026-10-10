@@ -224,8 +224,14 @@ requests.
 Each group's header toggles it. At desktop widths a collapsed group shows its
 cards only and an open one adds its charts; groups start collapsed, so the
 default view is the cards. Below 640 px all four groups collapse to a one-line header (group name plus
-two or three headline numbers) that expands on tap. The Health header starts
-with a warning sign when any of its cards is amber or red. A box with several
+two or three headline numbers) that expands on tap. In the Health
+summary the warning sign sits on the item that is amber or red (`up · ⚠ 4 failed ·
+26.5 GB free`, `⚠ stalled · …`, `… · ⚠ 1.2 GB free`), coloured like its card. The
+summaries are short enough not to truncate at 390 px (`31.4 t/s · TTFT 2.0 s · 5.0/h`,
+`hit 92% · miss 4% · 11 ms`). On a phone the status dot and word never split
+across lines, and the recent-requests table uses tighter cells and fixed column
+widths so time (with the conversation tag), route, status, duration, queue wait
+and TTFT fit without scrolling; the other columns scroll inside the table. A box with several
 slots shows its slot tiles two per row. The open/closed state is kept for the page session
 (`sessionStorage`).
 
@@ -321,8 +327,14 @@ a sensor exists). The number beside a chart title is the card's window value
 - **One time axis.** Every chart uses the selected window as its x range, with
   ticks at local times, so a point lines up vertically across all charts.
 - **Gaps and dots.** Buckets with no data are gaps. Consecutive buckets are
-  joined; a bucket with no neighbour is drawn as a dot (a `<circle>`, or one
-  round-capped path when there are more than 40), so sparse traffic still shows.
+  joined by the solid line (and p95 band); a bucket with no neighbour is drawn as a
+  dot (a `<circle>`, or one round-capped path when there are more than 40), so sparse
+  traffic still shows. When fewer than 40 % of the window's buckets hold data, every
+  populated bucket gets a dot, and one faint thin line (same hue, 30 % opacity, a single
+  path) connects consecutive points across the empty buckets so the series reads as a
+  trend. A gap longer than a sixth of the window, or one containing an upstream `down`
+  event, is not bridged, so an outage still shows as a gap. Dense series keep the plain
+  line without per-point dots. Bar charts are unchanged.
 - **Crosshair.** Moving over any chart draws a vertical line on every chart (in
   both columns; its position is computed from the time under the pointer, not
   from the page x) and
