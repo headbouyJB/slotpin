@@ -9,6 +9,10 @@ stability guarantee yet).
 
 ## [Unreleased]
 
+## [1.0.0a7] - 2026-10-10
+
+First public release. Everything since 1.0.0a1 is listed here.
+
 ### Added -- fail-fast on a silent upstream (off by default)
 
 A stalled engine that has already sent `200`, a role-only event and then only
