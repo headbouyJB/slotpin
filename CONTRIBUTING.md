@@ -2,6 +2,22 @@
 
 Thanks for helping. This is a small, alpha-stage project; keep changes focused.
 
+## Before you open a pull request
+
+- **Open an issue first for anything bigger than a bug fix**, so the approach
+  is agreed before you write it.
+- **One change per pull request.** No drive-by refactors, renames or
+  reformatting alongside a fix.
+- **Say what you tested, and against what** (llama-server, Gufo, or only the
+  fake upstream in the tests). "Not tested against a real server" is fine;
+  leaving it out is not.
+- **AI-assisted changes are welcome.** Say which tool or model you used and
+  what you verified yourself. You are responsible for the change either way.
+- Default behaviour should not change without a reason stated in the pull
+  request.
+
+The pull request template asks for these.
+
 ## Dev setup
 
 Python 3.11 or newer. Node.js is optional but needed for the dashboard page tests.
