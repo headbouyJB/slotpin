@@ -1,0 +1,17 @@
+# logrotate config for slotpin's per-turn metric stream.
+# Install to /etc/logrotate.d/slotpin-metrics.
+#
+# copytruncate: slotpin holds the file open and appends; rotating in place
+# (truncate after copy) avoids needing to signal/restart the proxy. A rotation
+# race can drop at most a few metric lines -- acceptable for an observability
+# stream, not billing data. The dashboard's rollup is resilient to rotation
+# (it re-reads from offset 0 when the file shrinks).
+/var/lib/slotpin/metrics.jsonl {
+    weekly
+    rotate 4
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+}

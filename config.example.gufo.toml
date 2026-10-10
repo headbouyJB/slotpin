@@ -1,0 +1,88 @@
+# slotpin example configuration: in front of the Gufo engine.
+#
+# Gufo owns prompt caching itself (memory + disk continuation cache), so
+# slotpin's llama.cpp cache machinery is switched off and slotpin acts as a
+# classifying, scheduling, instrumenting relay. See "Running in front of Gufo"
+# in docs/operations.md.
+#
+# Validate without starting anything:
+#   slotpin-proxy --config config.example.gufo.toml --check
+#
+# Precedence: built-in defaults < this file < SLOTPIN_* environment variables.
+# Full key reference: docs/configuration.md
+
+# The proxy has NO authentication (see SECURITY.md). Keep it on loopback
+# unless it sits behind a firewall, a VPN or an authenticating reverse proxy.
+listen_host = "127.0.0.1"
+listen_port = 8090
+
+upstream_kind = "gufo"
+
+# Gufo's HTTP port. Admin points at the same port: /v1/models and /metrics
+# are read there for reload detection and cache reporting.
+upstream_host = "127.0.0.1"
+upstream_port = 8080
+admin_host = "127.0.0.1"
+admin_port = 8080
+
+# These three MUST be false with upstream_kind = "gufo" (config error
+# otherwise): Gufo has no slot save/restore API and owns prompt caching.
+kv_persist = false
+kv_adaptive = false
+prefix_restore = false
+
+# slots and max_inflight must NOT exceed Gufo's --sessions. Admission is
+# slotpin's job; letting more turns through than Gufo has sessions just moves
+# the queue into Gufo, where tiers and aging do not apply.
+slots = 1
+max_inflight = 1
+
+# Priority scheduler: tier order plus aging so low tiers are delayed, never
+# starved.
+sched_enabled = true
+queue_timeout_s = 600.0
+max_wait_s = 60.0
+default_tier = 10
+
+upstream_timeout_s = 1800.0
+
+# Fail-fast on a silent upstream (streaming chat only). Both are off here.
+# upstream_stall_timeout_s: longest time (s) with no real output event and no
+# token progress before the upstream request is aborted; set it above your
+# longest cold prefill and below upstream_timeout_s, e.g. 180.
+# hold_headers_until_first_output: send the client nothing until the first
+# output event so a prefill stall becomes a clean 504 instead of a cut 200
+# stream (the client's header timeout must then exceed the limit).
+upstream_stall_timeout_s = 0.0
+hold_headers_until_first_output = false
+
+# Per-turn JSONL metrics stream; the dashboard reads this file.
+metrics_file = "/var/lib/slotpin/metrics.jsonl"
+
+# Optional whole-box energy capture (see deploy/esphome/).
+# energy_url = "http://192.0.2.10/metrics"
+# energy_metric = "total_energy"
+
+# Classification. With no lanes every request is lane "default" at
+# default_tier, and slotpin still schedules and records metrics. Rules are
+# regular expressions; lane `match` patterns are tested against the request
+# body text. This lane matches a marker you put in your interactive client's
+# system prompt.
+[[classify.lanes]]
+name = "chat"
+match = ["# interactive"]
+tier = 0
+interactive = true
+
+# Demote periodic polls that share the interactive prompt:
+# [[classify.demote]]
+# name = "heartbeat"
+# first_user_match = "^heartbeat"
+# max_messages = 40
+# tier = 20
+
+# Label background work (the label's tier sets the scheduler tier):
+# [[classify.labels]]
+# match = "nightly-summary"
+# label = "summary"
+# tier = 20

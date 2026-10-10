@@ -1,0 +1,45 @@
+[Unit]
+Description=slotpin-dash - read-only live + historical dashboard for slotpin-proxy
+# Observer only: reads slotpin's metrics.jsonl, the llama-server /slots admin
+# endpoint, the whole-box energy feed and /proc/meminfo. It never writes to
+# slotpin's data dir, so it does not need to be ordered after slotpin-proxy --
+# it degrades gracefully (shows "proxy/model down") until they come up.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# install.sh substitutes the --user value here.
+User=slotpin
+
+# Rollup DB lives here (5-min buckets for the 1h/24h/72h/7d trends view).
+# StateDirectory creates + owns /var/lib/slotpin-dash and keeps it writable
+# under ProtectSystem=strict.
+StateDirectory=slotpin-dash
+
+# Optional DASH_* overrides (host/port, upstream, energy URL, window, DB path).
+# Leading "-" makes the file optional -- the built-in defaults are sufficient.
+EnvironmentFile=-/etc/slotpin/slotpin-dash.env
+
+# The console entry point installed into the venv by the package
+# (pyproject [project.scripts] slotpin-dash). If you symlink it to
+# /usr/local/bin like slotpin-proxy, point ExecStart there instead.
+ExecStart=/opt/slotpin/venv/bin/slotpin-dash
+
+Restart=on-failure
+RestartSec=3
+
+# --- Hardening (read-only monitor; only its StateDirectory is writable) ---
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+# slotpin's data dir (metrics.jsonl) is read-only to the dashboard.
+ReadOnlyPaths=/var/lib/slotpin
+
+[Install]
+WantedBy=multi-user.target

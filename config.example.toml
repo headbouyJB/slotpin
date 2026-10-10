@@ -1,0 +1,243 @@
+# slotpin example configuration: single box, llama-server directly.
+#
+# Copy to /etc/slotpin/config.toml and adjust. For a single box running one
+# llama-server model the only things you normally need to change are
+# slot_save_path (must equal llama-server --slot-save-path) and
+# cache_ram_mb (must equal llama-server --cache-ram). For the Gufo engine
+# see config.example.gufo.toml.
+#
+# Validate without starting anything:
+#   slotpin-proxy --config /etc/slotpin/config.toml --check
+#
+# Precedence: built-in defaults < this file < SLOTPIN_* environment variables.
+# Full key reference: docs/configuration.md
+
+# ---------------------------------------------------------------------------
+# Listener
+# ---------------------------------------------------------------------------
+# The proxy has NO authentication (see SECURITY.md). Keep it on loopback
+# unless it sits behind a firewall, a VPN or an authenticating reverse proxy;
+# only then bind a LAN address (or "0.0.0.0").
+listen_host = "127.0.0.1"
+listen_port = 8090
+
+# ---------------------------------------------------------------------------
+# Upstream
+# ---------------------------------------------------------------------------
+# What serves behind the proxy: "llamacpp" (llama-server) or "gufo".
+upstream_kind = "llamacpp"
+
+# The normal request path. This is llama-server itself; if you run llama-swap
+# in front of llama-server, point this at llama-swap instead.
+upstream_host = "127.0.0.1"
+upstream_port = 8080
+
+# Admin path: slot save/restore and /props (reload detection). This must be
+# the llama-server itself. With llama-swap in front, point it at the
+# llama-server's own port (llama-swap does not proxy the slot API).
+admin_host = "127.0.0.1"
+admin_port = 8080
+
+# ---------------------------------------------------------------------------
+# Slots and concurrency
+# ---------------------------------------------------------------------------
+# Number of KV slots llama-server serves (its -np flag) and how many requests
+# the proxy lets through at once (max_inflight must be <= slots; slots > 1
+# requires sched_enabled). One slot is the fastest choice on
+# memory-bandwidth-bound hardware.
+slots = 1
+max_inflight = 1
+
+# ---------------------------------------------------------------------------
+# KV disk-warmth and priority scheduler
+# ---------------------------------------------------------------------------
+# kv_persist: save the KV state of recurring prompts to disk and restore it
+# when the in-memory copy has been evicted, instead of re-prefilling.
+kv_persist = true
+# kv_adaptive: extend persistence beyond the interactive lane to any prefix
+# that recurs recur_threshold times.
+kv_adaptive = false
+# Priority scheduler: turn-boundary admission, strict tier order, aging.
+sched_enabled = true
+
+# Directory for slot KV snapshots (<prefix_hash>.bin plus optional .ckpt
+# sidecars) and the latest_alias file. It MUST equal llama-server's
+# --slot-save-path (slotpin globs this directory for the same files). Use a
+# persistent disk, NEVER tmpfs such as /tmp: tmpfs puts KV in RAM, can push
+# the host into OOM, and on a unified-memory APU steals decode bandwidth.
+# `slotpin-proxy --check` warns about a tmpfs path.
+slot_save_path = "/var/lib/slotpin/kv-cache"
+
+# A prefix on a non-interactive lane must recur this many times before it is
+# worth a snapshot. The interactive lane is warm-worthy on first sight.
+recur_threshold = 3
+
+# Snapshot files older than this are garbage-collected opportunistically.
+snapshot_ttl_h = 48.0
+
+# Minimum seconds between saves for the same prefix hash.
+prefix_save_min_interval_s = 300.0
+
+# Longest-common-prefix restore: reuse a snapshot whose rendered prompt shares
+# a long leading prefix even when the tail of the system message changed
+# (dates, per-run context). Off by default; see docs/configuration.md.
+prefix_restore = false
+prefix_chunk_chars = 4096
+prefix_restore_min_chars = 32768
+
+# ---------------------------------------------------------------------------
+# Cache-RAM pool model
+# ---------------------------------------------------------------------------
+# MUST equal llama-server's own --cache-ram flag (MiB). The proxy infers from
+# this whether a session is still warm in llama-server's host-RAM prompt cache
+# or needs a disk restore. A mismatch makes it over- or under-estimate the
+# pool, which suppresses needed restores (slow turns) or triggers pointless
+# ones. Keep it in lock-step (docs/operations.md).
+cache_ram_mb = 2048
+
+# KV bytes per token for your model and KV-cache quantisation. The default
+# (16900) is roughly a q8 KV cache for a mid-size MoE model; recompute it for
+# your own model: layers * kv_heads * head_dim * 2 (K and V) * bytes/element.
+bytes_per_token = 16900
+
+# Safety margin on the derived token cap:
+#   cram_token_cap = cache_ram_mb * 1024**2 / bytes_per_token * cram_safety
+cram_safety = 0.85
+
+# ---------------------------------------------------------------------------
+# Scheduler tuning
+# ---------------------------------------------------------------------------
+# How long a queued request waits for admission before it is shed (503).
+queue_timeout_s = 600.0
+
+# Anti-starvation aging: a queued request's effective priority rises toward
+# the top tier as it waits, reaching it after max_wait_s, so sustained
+# high-tier traffic can delay but never starve lower tiers.
+max_wait_s = 60.0
+
+# Optional backpressure: under sustained saturation, waiters at tier >=
+# backpressure_min_tier that have queued longer than bp_drop_s are shed (503)
+# instead of left to age. Off by default.
+sched_backpressure = false
+backpressure_min_tier = 20
+bp_drop_s = 45.0
+
+# Tier for a request that matches no lane and no tiered label. Lower numbers
+# are served first.
+default_tier = 10
+
+# ---------------------------------------------------------------------------
+# Timeouts and fail-fast
+# ---------------------------------------------------------------------------
+upstream_timeout_s = 1800.0
+admin_timeout_s = 30.0
+downstream_write_timeout_s = 30.0
+
+# Fail-fast on a silent upstream (streaming chat only; both off by default).
+# A stalled engine can keep the connection alive with ": ping" comments, so
+# the socket timeout never fires. upstream_stall_timeout_s is the longest time
+# (s) with no real output event (text, reasoning or tool-call delta) AND no
+# token progress in the upstream's /slots counters (a tool call decodes
+# silently) before the upstream request is aborted; detection can take up to
+# ~1.5x the limit. Set it above your longest cold prefill and well below
+# upstream_timeout_s (for example 180 for a ~110 s worst-case prefill).
+# hold_headers_until_first_output sends the client nothing until the first
+# output event, so a prefill stall becomes a clean 504
+# {"error": "upstream_stalled"} instead of a cut 200 stream; the client's
+# response-header timeout must then exceed the limit.
+# See docs/configuration.md.
+upstream_stall_timeout_s = 0.0
+hold_headers_until_first_output = false
+
+# ---------------------------------------------------------------------------
+# Metrics
+# ---------------------------------------------------------------------------
+# Per-turn JSONL stream (rotated by size). The dashboard reads this file.
+metrics_file = "/var/lib/slotpin/metrics.jsonl"
+metrics_rotate_mb = 32.0
+metrics_keep = 3
+
+# Optional whole-box energy capture: an ESPHome plug exposing a Prometheus
+# /metrics endpoint (see deploy/esphome/). Off unless energy_url is set.
+# energy_url = "http://192.0.2.10/metrics"
+# energy_metric = "total_energy"
+
+# Optional tag stamped on every metric record, e.g. to distinguish two serving
+# configurations of the same model in benchmarks. The proxy cannot derive
+# flags such as speculative decoding from /props, so you name them here.
+# upstream_config_id = "my-model-q4-plain"
+
+# ---------------------------------------------------------------------------
+# Reload detection
+# ---------------------------------------------------------------------------
+# Polls the admin host's /props; a change of model or a restart clears the
+# inferred cache-ram pool and the per-slot occupant map automatically.
+reload_detect = true
+reload_poll_s = 10.0
+
+# ---------------------------------------------------------------------------
+# Prefix hashing and the disk-warmth fallback alias
+# ---------------------------------------------------------------------------
+# Characters of the request body used as the prefix hash when there is no
+# system message.
+prefix_hash_chars = 4000
+
+# Copy/symlink of the interactive lane's most recent snapshot. A cold
+# interactive turn whose own prefix has no snapshot restores this lineage
+# instead of a full cold prefill.
+latest_alias = "interactive-latest"
+
+# ---------------------------------------------------------------------------
+# Debug
+# ---------------------------------------------------------------------------
+# Capture upstream 400 responses to /tmp for grammar/format debugging.
+# Leave off in production.
+capture_400 = false
+
+# ===========================================================================
+# Classification
+# ===========================================================================
+# Classification decides each request's lane, scheduler tier and label.
+# It is entirely configuration-driven. With NO lanes configured every request
+# classifies to lane "default" at default_tier, and the proxy still works as a
+# slot-pinning, metrics-recording proxy; add lanes only when you want
+# interactive traffic to jump the queue and own the warm slot.
+#
+# Rules are regular expressions (Python `re`, searched not anchored). Lane
+# `match` patterns are ALL tested against the request body text; the optional
+# `match_system` patterns against the system message text.
+
+# ---- Lanes ([[classify.lanes]]) ----
+# The first lane whose patterns all match wins. At most one lane may be
+# interactive = true; that lane is warm-worthy on first sight and owns the
+# latest_alias snapshot. A simple convention is to put a marker in the system
+# prompt of your interactive client and match it here.
+[[classify.lanes]]
+name = "chat"
+match = ["# interactive"]
+tier = 0
+interactive = true
+
+# ---- Demote rules ([[classify.demote]]) ----
+# Checked after lane matching. When the first user message matches
+# `first_user_match` and the conversation has at most `max_messages`
+# messages, the request is demoted: the rule's name becomes its label, its
+# tier replaces the lane tier, and it stops being interactive. Useful for
+# periodic polls that share the interactive client's prompt but must never
+# displace the warm session.
+#
+# [[classify.demote]]
+# name = "heartbeat"
+# first_user_match = "^heartbeat"
+# max_messages = 40
+# tier = 20
+
+# ---- Labels ([[classify.labels]]) ----
+# First match against the body text wins. The label shows up in /_stats and in
+# metrics; if a `tier` is given it also sets the scheduler tier, otherwise
+# default_tier applies.
+#
+# [[classify.labels]]
+# match = "nightly-summary"
+# label = "summary"
+# tier = 20

@@ -1,0 +1,68 @@
+# slotpin whole-box energy capture -- ESPHome additions for a LocalBytes plug-pm
+# =============================================================================
+# Hardware: LocalBytes Smart Plug PM (HLW8012-based, ESPHome)
+#   https://www.mylocalbytes.com/products/smart-plug-pm
+# =============================================================================
+# Append these blocks to your existing plug's ESPHome YAML (the one that pulls
+# in `packages: localbytes.plug-pm`), then Install -> OTA. slotpin then polls
+# the plug's /metrics endpoint for per-turn whole-box energy.
+#
+# Why each piece:
+#   web_server (v1)  -- serves HTTP on :80; required by `prometheus:`. v1 is the
+#                       lightest (no JS UI), easiest on the ESP8266's RAM.
+#   prometheus       -- exposes GET /metrics (esphome_sensor_value{id=...} <v>),
+#                       which slotpin scrapes. Also unfilters the readings that
+#                       Home Assistant's significant-change logic would throttle.
+#   power_monitor    -- the package's HLW8012 defaults to update_interval: 10s;
+#     update_interval   1s makes the energy integrator advance finely in time so
+#                       a single short turn is resolvable. (HLW8012 is a little
+#                       noisy at 1s when the plug is near-idle; that's fine --
+#                       idle energy is negligible, and it's accurate under load.)
+#   daily_energy_hires-- the package's stock "Daily Energy" reports only 2
+#                       decimals (0.01 kWh = 10 Wh steps), far too coarse for one
+#                       run. This adds a second counter integrating the same
+#                       `power` sensor at accuracy_decimals: 5 (0.01 Wh). It
+#                       resets at midnight (restore: false); slotpin suppresses
+#                       the delta across that reset.
+#
+# NOTE: ids referenced here (`power_monitor`, `power`) are defined by the
+# LocalBytes plug-pm package. A different plug/package may name them
+# differently -- adjust `!extend`/`power_id` to match.
+
+web_server:
+  version: 1
+
+prometheus:
+
+sensor:
+  # Faster power sampling -> finer-grained energy integration.
+  - id: !extend power_monitor
+    update_interval: 1s
+
+  # RECOMMENDED counter: non-resetting total energy. An `integration` of the
+  # power sensor that never resets at midnight, so slotpin's per-turn deltas
+  # are always valid (no reset gap). restore:true keeps it monotonic across
+  # reboots. slotpin reads this via energy_metric = "total_energy".
+  - platform: integration
+    name: "Total Energy"
+    id: total_energy
+    sensor: power
+    time_unit: h
+    restore: true
+    filters:
+      - multiply: 0.001          # W*h -> kWh
+    unit_of_measurement: "kWh"
+    accuracy_decimals: 5
+
+  # Alternative / also-useful: high-resolution DAILY energy (0.01 Wh), resets
+  # at midnight (slotpin handles the reset gracefully). Keep for a daily view;
+  # or drop it and use only total_energy above.
+  - platform: total_daily_energy
+    name: "Daily Energy HiRes"
+    id: daily_energy_hires
+    power_id: power
+    restore: false
+    filters:
+      - multiply: 0.001          # Wh -> kWh, matching the package's Daily Energy
+    unit_of_measurement: "kWh"
+    accuracy_decimals: 5

@@ -1,0 +1,1 @@
+{"object":"list","data":[{"id":"fast-rocmfp4","object":"model","created":1790957432,"owned_by":"gufo","context_length":200192,"architecture":{"input_modalities":["text","image"]}}]}

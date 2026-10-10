@@ -1,0 +1,49 @@
+[Unit]
+Description=slotpin-proxy - KV-warmth-preserving reverse proxy for llama.cpp
+# If llama-server (or llama-swap) runs as a systemd unit on this host, order
+# after it by uncommenting the two lines below and adjusting the unit name.
+#After=network-online.target llama-swap.service
+#Wants=llama-swap.service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+
+# Legacy SLOTPIN_* env var overrides (see slotpin-proxy.env.example). The
+# leading "-" means this file is optional -- config.toml alone is sufficient.
+EnvironmentFile=-/etc/slotpin/slotpin.env
+
+# --check validates config and exits 0/1 without starting the server; a bad
+# config.toml or env override fails the unit at start time instead of at the
+# first request.
+ExecStartPre=/usr/local/bin/slotpin-proxy --config /etc/slotpin/config.toml --check
+ExecStart=/usr/local/bin/slotpin-proxy --config /etc/slotpin/config.toml
+
+Restart=always
+RestartSec=2
+
+# --- Hardening ---
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+
+# ProtectSystem=strict makes the whole filesystem read-only except for the
+# paths listed here. These MUST include config.toml's slot_save_path and the
+# directory containing metrics_file; the defaults below match the example
+# config. install.sh substitutes --data-dir.
+ReadWritePaths=/var/lib/slotpin
+
+# Uncomment and tune on memory-tight hosts (KV save spikes and context
+# checkpoints compete with the model for RAM; a runaway proxy save path should
+# not be able to OOM the model process). Start conservative and
+# raise only if you observe legitimate OOM-kills of the proxy itself.
+#MemoryMax=512M
+
+[Install]
+WantedBy=multi-user.target
