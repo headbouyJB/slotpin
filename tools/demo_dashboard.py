@@ -749,6 +749,7 @@ def start_demo(
     dash.PROXY_ADDR = f"127.0.0.1:{fake_port}"
     dash.ENERGY_URL = f"http://127.0.0.1:{fake_port}/energy"
     dash.DASH_LABEL = LABEL
+    dash.DRAFTER = "MTP"
     dash.BOXES = []
     dash.POLL_SEC = poll_sec
     dash.read_meminfo = lambda: scn.model.mem(time.time(), bump=0.0)
