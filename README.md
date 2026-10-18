@@ -63,7 +63,7 @@ DASH_DB=$HOME/slotpin-rollup.db \
 slotpin-dash
 ```
 
-Open `http://127.0.0.1:8091`. It shows whether the proxy and upstream are up, slot occupancy, throughput and time to first token, warm and cold rates, queue waits, GPU and host memory, temperatures, and optionally power and energy, live and over 1 hour, 24 hours, 72 hours and 7 days, with a request list. It never writes to the proxy's data and never serves prompt text. The variable list is in [docs/configuration.md](docs/configuration.md#dashboard-environment-variables); details are in [docs/dashboard.md](docs/dashboard.md).
+Open `http://127.0.0.1:8091`. It shows whether the proxy and upstream are up, slot occupancy, throughput and time to first token, how decode and prefill speed fall with context depth, warm and cold rates, queue waits, GPU and host memory, temperatures, and optionally power and energy, live and over 1 hour, 24 hours, 72 hours and 7 days, with a request list. It never writes to the proxy's data and never serves prompt text. The variable list is in [docs/configuration.md](docs/configuration.md#dashboard-environment-variables); details are in [docs/dashboard.md](docs/dashboard.md).
 
 ## Try the dashboard with demo data
 
@@ -74,6 +74,34 @@ python tools/demo_dashboard.py
 ```
 
 It prints a URL (`http://127.0.0.1:8099/` by default). Everything runs on loopback: a fake upstream with four slots, a fake energy feed, seven days of invented `metrics.jsonl` and history (including one restart and one stall), and the real dashboard reading them. Nothing is read from your machine, so it looks the same on macOS and Linux. Stop it with Ctrl-C; `--seed`, `--port` and `--once-seconds N` are the useful flags. `tools/capture_screenshots.py` regenerates the images in `docs/img` from it with headless Chrome.
+
+## Grafana / Prometheus
+
+The dashboard also serves `GET /metrics` in the Prometheus text format, so Prometheus, VictoriaMetrics or Grafana Agent can scrape it and Grafana can chart it alongside your other hosts. Families are `slotpin_*` with bounded labels only (`route`, `status`, `reason`, `depth`, `concurrency`, `sensor`): request, token, draft and failure counters, histograms for TTFT, duration and queue wait (by lane) and for decode and prefill speed by context-depth bin, and gauges for slots, memory, GTT, power, energy and temperatures. Counters are monotonic across dashboard restarts and the 8-day retention (expiring rows are folded into a persisted base). The full list, bucket bounds and reset semantics are in [docs/dashboard.md](docs/dashboard.md#prometheus-metrics-metrics).
+
+```yaml
+scrape_configs:
+  - job_name: slotpin
+    scrape_interval: 30s
+    static_configs:
+      - targets: ["127.0.0.1:8091"]   # one target per box
+        labels: {box: box-a}
+```
+
+A performance-vs-depth panel (median decode t/s per context depth bin over the last day, one line per bin; use `{{depth}}` as the legend):
+
+```promql
+histogram_quantile(0.5, sum by (depth, le) (increase(slotpin_decode_tokens_per_second_bucket[1d])))
+```
+
+The quantile is interpolated inside the fixed buckets, so for an exact figure chart the mean instead:
+
+```promql
+sum by (depth) (increase(slotpin_decode_tokens_per_second_sum[1d]))
+  / sum by (depth) (increase(slotpin_decode_tokens_per_second_count[1d]))
+```
+
+Swap `prefill_tokens_per_second` for the prefill curve, add `concurrency` to the `by` clause to separate single-slot turns from loaded ones, and use `rate(slotpin_requests_total[5m])`, `histogram_quantile(0.95, sum by (le) (rate(slotpin_ttft_seconds_bucket[1h])))` and `increase(slotpin_energy_kwh_total[1d])` for throughput, p95 TTFT and daily energy.
 
 ## Durable install (systemd)
 

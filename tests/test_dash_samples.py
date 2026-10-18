@@ -306,6 +306,7 @@ def test_api_history_new_and_old_keys(env):
         "cards",
         "request_series",
         "request_bucket_sec",
+        "depth",
     }
     assert h["sample_bucket_sec"] == 60 and h["samples"]
     new = {"min_mem_free_mb", "max_page_cache_mb", "max_swap_used_mb", "max_gtt_used_mb"}

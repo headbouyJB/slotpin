@@ -79,9 +79,15 @@ there are no non-`GET` routes.
 - `GET /api/state` — live JSON: health, current slots, current power/free-RAM,
   the last-15-min window, and the recent-request stream.
 - `GET /api/history?window=<seconds>` — a window summary, the chart series
-  (`samples`, `request_series`) and event markers, plus the legacy downsampled
+  (`samples`, `request_series`, `depth`) and event markers, plus the legacy downsampled
   `series` (the page no longer uses it). `window` (seconds, default 3600) is
   clamped to `[300, 8d]`.
+- `GET /api/depth?window=<seconds>` — only the `depth` object of `/api/history`
+  (decode and prefill speed per context-depth bin, see `depth_series` below),
+  same `window` handling, for scripts and curl. The page itself reads it from
+  `/api/history`.
+- `GET /metrics` — Prometheus text exposition (format 0.0.4) for a Prometheus,
+  VictoriaMetrics or Grafana Agent scrape; see "Prometheus metrics" below.
 - `GET /api/requests?window=<sec>&from=&to=&offset=&limit=&filter=&route=` — the
   paged request list from the `requests` table (below), newest first. `window`
   clamped to `[300, 8d]` (default 3600); optional `from` / `to` (epoch seconds,
@@ -317,7 +323,8 @@ leaves the last cell empty. All charts have the same width and the same fixed
 60 px tall. Inline SVG, no
 library. Health: Failures per bucket (bars), Memory (stacked area: free, page
 cache, other used = total - free - page cache; swap used and GTT as lines).
-Performance: Decode, Prefill and TTFT (p50 line with a p50-p95 band), Requests
+Performance: Decode, Prefill and TTFT (p50 line with a p50-p95 band), Decode vs
+depth and Prefill vs depth (below, not time series), Requests
 per bucket (bars, ok + failed), Draft accept %. Cache: Cache hit %, Miss %,
 Restore ms (p50 line with band). System: GPU memory, Power, CPU temp and GPU
 temp (mean line plus the max as a lighter line), NVMe temp (max line; only when
@@ -360,6 +367,25 @@ a sensor exists). The number beside a chart title is the card's window value
   390 px) and are hidden with their cards when a group is collapsed.
 - Every API string put into the page (event detail, miss reasons) goes through
   `esc()`.
+
+**Depth charts** (Performance group, the row under the Decode and Prefill time
+charts; same cell size, plot width and y gutter as the other charts, so on a
+phone the two stack with the same x axis): decode t/s and prefill t/s against
+context depth, from `depth` in `/api/history` (`depth_series` below). The x
+axis is the seven `prompt_n` bins `<4K, 4-8K, 8-16K, 16-32K, 32-64K, 64-128K,
+>=128K` (K = 1024 tokens), equally spaced, so it is a log2 axis; ticks at the
+six edges. One point per populated bin at the median, joined by a line; with a
+single series the p25-p75 band is shaded. A bin with fewer than three turns
+is drawn as a hollow dot (and its readout says `few`); an empty bin is a gap.
+The number beside the title is the turns the chart is built from. On a box with
+more than one slot the decode chart has one line per concurrency bucket (`1
+slot`, `2 slots`, `3 slots`, `4+`, `conc. unknown`), the legend sits in the
+readout row while idle and there is no band. Moving over either depth chart
+shades that bin on both and fills both readouts (bin, median, quartiles, n);
+the time crosshair is not involved and the cards hold still as for it. No
+event markers. "no data" when the window has no qualifying turns (or the
+server predates the field). The two charts follow the window selector and
+refresh with `/api/history`.
 
 ## How the historical view works
 
@@ -416,6 +442,31 @@ field), `draft_accept_pct` and `miss_reasons` (`{reason: count}`, "unknown" when
 the reason is missing). Medians and p95 are the same `_median` / `_pctile` as
 `window_stats`; a measure with no data is `null`.
 
+### `depth_series` (speed against context depth, from the `requests` table)
+
+`slotpin.dash.depth_series(window_sec, now=None)` bins the window's ok rows
+by `prompt_n` (context depth at request time) with doubling edges
+`DEPTH_EDGES = 4096, 8192, 16384, 32768, 65536, 131072` into the seven bins
+`DEPTH_LABELS` (`<4K` .. `>=128K`). Per bin it reports `n` and the nearest-rank
+`p25` / `p75` and exact `p50` (same `_pctile` / `_median` as the cards; `null`
+when `n` is 0). Returned as `depth` by `/api/history` and alone by
+`/api/depth`:
+
+- `decode`: rows with `decode_tps > 0` and `completion_n >= 64`
+  (`DEPTH_DECODE_MIN_COMPLETION`; the decode speed of a shorter completion is
+  noise, so this is stricter than the Decode card). On a box with more than
+  one slot (`slots` in the proxy config, as the Concurrency card) `split` is
+  `"concurrency"` and `series` holds one entry per concurrency bucket seen,
+  in the order `1, 2, 3, 4+, ?`: a turn's mean `concurrency` rounded to the
+  nearest whole slot, `4+` above 3.5, `?` when the row has none. Otherwise
+  `split` is `null` and there is one series with key `all`.
+- `prefill`: rows with `prefill_tps > 0` and `prompt_n - cache_n >= 2000`
+  (`PREFILL_MIN_NEW`, the Prefill card's rule); one series, key `all`.
+- `n` on each is the number of rows used; `min_completion_n`, `min_new_tokens`
+  and `few_below` (3) carry the constants so the page need not repeat them.
+  Series with no rows are omitted, so an empty window has empty `series`
+  lists. The whole object is under 4 KB whatever the window.
+
 ### The `samples` table (1-minute sample rows)
 
 Sampled series (power, energy counter, temperatures, memory) also go to a
@@ -459,6 +510,61 @@ unchanged; an existing DB gains the table on first start.
   long.
 - **Restart markers are forward-looking.** The collector records model up/down
   transitions it observes; outages from before it started are not marked.
+
+## Prometheus metrics (`/metrics`)
+
+`GET /metrics` returns the Prometheus text exposition format (`# HELP` / `# TYPE`
+per family, `text/plain; version=0.0.4; charset=utf-8`, no timestamps), written by
+hand with the standard library. Scrape it with Prometheus, VictoriaMetrics or
+Grafana Agent and build panels in Grafana; the README has a scrape config and the
+depth-curve queries. Like every other route it has no authentication, so keep the
+bind address on loopback or behind an authenticating proxy.
+
+All names start with `slotpin_`. **Labels are bounded**: `route` (the lane
+names from the operator's config, `unknown` when a row has none), `status`
+(`ok` / `failed`), `reason` (the proxy's `turn_failed` reasons), `depth` (the
+seven `DEPTH_LABELS` bins of `prompt_n`), `concurrency` (`1`, `2`, `3`, `4+`,
+`?`: the turn's mean concurrency rounded to the nearest whole slot, `?` when the
+row has none; always present on the decode histogram, whatever the slot count),
+`sensor` (`cpu`, `gpu`, `nvme`) and `le`. No prefix, slot, request id, config id
+or build string, and never prompt text. Label values are escaped per the format.
+
+| Family | Type | Labels | Source |
+| --- | --- | --- | --- |
+| `slotpin_requests_total` | counter | `route`, `status` | one per `requests` row |
+| `slotpin_failures_total` | counter | `reason` | failed rows |
+| `slotpin_prompt_tokens_total` / `slotpin_cached_tokens_total` / `slotpin_generated_tokens_total` | counter | `route` | `prompt_n` / `cache_n` / `completion_n` of ok rows |
+| `slotpin_draft_proposed_tokens_total` / `slotpin_draft_accepted_tokens_total` | counter | — | `draft_n` / `draft_n_accepted` |
+| `slotpin_turn_energy_wh_total` | counter | `route` | `energy_fair_wh`, else `energy_turn_wh` |
+| `slotpin_ttft_seconds` | histogram | `route` | `ttft_s`; bounds 0.1 0.25 0.5 1 2 5 10 30 60 |
+| `slotpin_request_duration_seconds` | histogram | `route` | `dur_s`; bounds 1 2 5 10 30 60 120 300 600 |
+| `slotpin_queue_wait_seconds` | histogram | `route` | `queue_wait_ms / 1000`; bounds 0.01 0.05 0.1 0.5 1 5 10 30 60 |
+| `slotpin_decode_tokens_per_second` | histogram | `depth`, `concurrency` | `decode_tps` of ok rows with `completion_n >= 64` (the depth chart's rule); bounds 2 5 10 15 20 30 40 60 80 120 |
+| `slotpin_prefill_tokens_per_second` | histogram | `depth` | `prefill_tps` of ok rows with `prompt_n - cache_n >= 2000`; bounds 50 100 200 400 800 1600 3200 6400 |
+| `slotpin_proxy_up`, `slotpin_upstream_up`, `slotpin_upstream_stalled` | gauge | — | `/api/state` `health.proxy_up`, `health.model_up`, `health_v2.upstream == stalled` |
+| `slotpin_slots_total`, `slotpin_slots_busy` | gauge | — | `health.slots_total` / `slots_busy` |
+| `slotpin_last_completion_age_seconds` | gauge | — | `health_v2.last_completion_age_s` |
+| `slotpin_host_memory_total_bytes`, `_free_bytes`, `_available_bytes`, `slotpin_host_swap_used_bytes`, `slotpin_gpu_gtt_used_bytes` | gauge | — | `system.*_mb` x 1048576 |
+| `slotpin_power_watts` | gauge | — | `energy.power_w`; omitted while the feed is stale |
+| `slotpin_energy_kwh_total` | counter | — | `energy.total_kwh`, the plug's own cumulative counter |
+| `slotpin_temperature_celsius` | gauge | `sensor` | `temps.cpu_c` / `gpu_c` / `nvme_c` |
+
+A gauge whose value is unknown (no energy feed, no NVMe sensor) is omitted rather
+than reported as 0. The exposition is one `build_state()` (the `/api/state` body,
+so gauges match it) plus one read of the `requests` table per scrape; a 15-60 s
+scrape interval is fine.
+
+**Counters never fall.** Counter-type families (counters and every histogram
+bucket, `_sum` and `_count`) are computed from `requests` rows by one function.
+Rows are kept for `RETENTION_DAYS` (8); just before the prune deletes a row (in
+`_flush_db` and in the start-up backfill) the same function runs over the
+expiring rows and adds their contribution to the `prom_base` table (`key` =
+sample name + labels, `v`). An exposed counter is `prom_base` + live rows, so it
+is monotonic across dashboard restarts and across retention; a bucket is listed
+for every bound even at zero. The only reset is deleting the dashboard database
+(`DASH_DB`), which Prometheus handles as an ordinary counter reset. On a fresh
+database the counters start at the rows backfilled from `metrics.jsonl` (up to 8
+days), the same rows the dashboard shows.
 
 ## Rotating the metric stream
 

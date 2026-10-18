@@ -286,6 +286,9 @@ class Scenario:
                     "turns": 0,
                     "last": None,
                     "fp": self._hash(f"session{self._next_session}"),
+                    # one session in ten opens with a pasted document, so the
+                    # deep context bins of the depth charts have data
+                    "doc": int(self._lognorm(45000, 0.5, 20000, 110000)) if rng.random() < 0.1 else 0,
                 }
                 self._next_session += 1
                 self._sessions.append(s)
@@ -295,7 +298,7 @@ class Scenario:
                 ]
             new_tokens = int(self._lognorm(600, 0.7, 100, 6000))
             if s["turns"] == 0:
-                new_tokens += SYSTEM_PROMPT_TOKENS + int(rng.uniform(0, 2500))
+                new_tokens += SYSTEM_PROMPT_TOKENS + int(rng.uniform(0, 2500)) + s["doc"]
             prompt_n = s["hist"] + new_tokens
             gap = None if s["last"] is None else t - s["last"]
             tier, fp = 0, s["fp"]
@@ -337,8 +340,11 @@ class Scenario:
         completion_n = int(
             self._lognorm(430 if route == "chat" else 380, 0.7, 24, 2600)
         )
+        # both speeds fall with context depth (attention over a longer KV cache)
         decode_tps = self._lognorm(34.0, 0.16, 14.0, 52.0) / (1.0 + 0.32 * (conc - 1.0))
+        decode_tps /= 1.0 + prompt_n / 48000.0
         prefill_tps = self._lognorm(1050.0, 0.14, 500.0, 1600.0) / (1.0 + 0.25 * (conc - 1.0))
+        prefill_tps /= 1.0 + prompt_n / 90000.0
         stop = rng.choices(["stop", "tool_calls", "length"], [90, 7, 3])[0]
         if stop == "length":
             completion_n = int(self._lognorm(2000, 0.2, 1500, 2600))

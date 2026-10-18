@@ -251,6 +251,8 @@ const tail=`
   const res={cards:$('cards').innerHTML,hits:{},reads:{}};
   (${JSON.stringify(P.hits||[])}).forEach(([id,vx])=>{res.hits[id+':'+vx]=CHW[id].hit(vx);});
   (${JSON.stringify(P.reads||[])}).forEach(([id,t])=>{res.reads[id]=CHW[id].rd(t);});
+  res.dreads={};res.dleg={};
+  (${JSON.stringify(P.dreads||[])}).forEach(([id,i])=>{res.dreads[id+':'+i]=DPW[id].rd(i);res.dleg[id]=DPW[id].leg;});
   const ids=[...$('cards').innerHTML.matchAll(/class="chart" data-id="([^"]+)"/g)].map(m=>m[1]);
   res.ws={};ids.forEach(id=>{res.ws[id]=CHW[id].W;});
   const stubs=ids.map(id=>{const ln={attrs:{},cls:new Set(),setAttribute(k,v){this.attrs[k]=v;},
@@ -267,7 +269,9 @@ vm.runInContext(script+tail,ctx);
 NOW_P = 1_800_000_000
 
 
-def _run_charts(tmp_path, win, rw, sw, rs, sm, events, hits=(), reads=(), cw=640, iw=1400, xh=None):
+def _run_charts(
+    tmp_path, win, rw, sw, rs, sm, events, hits=(), reads=(), cw=640, iw=1400, xh=None, depth=None, dreads=()
+):
     payload = {
         "win": win,
         "cw": cw,
@@ -275,6 +279,7 @@ def _run_charts(tmp_path, win, rw, sw, rs, sm, events, hits=(), reads=(), cw=640
         "xh": xh,
         "hits": list(hits),
         "reads": list(reads),
+        "dreads": list(dreads),
         "state": {
             "now": NOW_P,
             "health": {
@@ -304,6 +309,8 @@ def _run_charts(tmp_path, win, rw, sw, rs, sm, events, hits=(), reads=(), cw=640
             "events": events,
         },
     }
+    if depth is not None:
+        payload["history"]["depth"] = depth
     (tmp_path / "h.js").write_text(NODE_HARNESS)
     (tmp_path / "page.js").write_text(_script(dash.render_page()))
     (tmp_path / "p.json").write_text(json.dumps(payload))
@@ -319,6 +326,11 @@ def _run_charts(tmp_path, win, rw, sw, rs, sm, events, hits=(), reads=(), cw=640
     for chunk in res["cards"].split('<div class="chart" data-id="')[1:]:
         charts[chunk.split('"', 1)[0]] = chunk
     res["charts"] = charts
+    # the depth charts (class "chart depth") are collected separately
+    depths = {}
+    for chunk in res["cards"].split('<div class="chart depth" data-id="')[1:]:
+        depths[chunk.split('"', 1)[0]] = chunk
+    res["depth_charts"] = depths
     return res
 
 
@@ -648,3 +660,129 @@ def test_phone_css_keeps_status_together_and_table_compact():
     assert "text-overflow:ellipsis" in narrow
     assert 'class="rt" title="${esc(r.route' in js  # full route kept, escaped, in the title
     assert "ctag" in narrow  # tag stays beside the time, just tighter
+
+
+# ---------------- depth charts: speed against context depth ----------------
+def _bin(n, p50, lo=None, hi=None):
+    if n == 0:
+        return {"n": 0, "p25": None, "p50": None, "p75": None}
+    return {"n": n, "p25": p50 if lo is None else lo, "p50": p50, "p75": p50 if hi is None else hi}
+
+
+def _depth(dec_series, pre_bins, split=None):
+    return {
+        "window_sec": 900,
+        "edges": list(dash.DEPTH_EDGES),
+        "bins": list(dash.DEPTH_LABELS),
+        "few_below": 3,
+        "decode": {
+            "n": sum(b["n"] for s in dec_series for b in s["bins"]),
+            "min_completion_n": 64,
+            "split": split,
+            "series": dec_series,
+        },
+        "prefill": {
+            "n": sum(b["n"] for b in pre_bins),
+            "min_new_tokens": 2000,
+            "series": [{"key": "all", "bins": pre_bins}] if pre_bins else [],
+        },
+    }
+
+
+def _svg(html):
+    return html[html.index("<svg") : html.index("</svg>")]
+
+
+def test_depth_chart_titles_and_placement():
+    js = _script(dash.render_page())
+    assert "'Decode vs depth'" in js and "'Prefill vs depth'" in js
+    assert "function depthChart(" in js and "class=\"chart depth\"" in js
+    # the depth pair sits right after the Decode / Prefill time charts, inside the Performance grid
+    perf = js[js.index("perf:cg(") : js.index("cache:cg(")]
+    assert perf.index("'prefill'") < perf.index("depthDec,depthPre") < perf.index("'ttft'")
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
+def test_depth_charts_render_with_data_and_without(tmp_path):
+    dec = [_bin(12, 40.0, 36.0, 44.0), _bin(30, 35.0, 31.0, 38.0), _bin(9, 30.0, 27.0, 33.0),
+           _bin(2, 22.0, 20.0, 24.0), _bin(0, 0), _bin(0, 0), _bin(0, 0)]
+    pre = [_bin(0, 0), _bin(8, 1200.0, 1100.0, 1300.0), _bin(5, 900.0, 850.0, 950.0),
+           _bin(0, 0), _bin(1, 400.0), _bin(0, 0), _bin(0, 0)]
+    t = NOW_P - 300
+    res = _run_charts(
+        tmp_path, 900, 60, 60, [_rq(t)], [_sm(t)], [],
+        depth=_depth([{"key": "all", "bins": dec}], pre),
+        dreads=[("depth_decode", 1), ("depth_decode", 3), ("depth_decode", 5), ("depth_prefill", 2)],
+    )
+    assert set(res["depth_charts"]) == {"depth_decode", "depth_prefill"}
+    # time charts untouched: still 14 (no NVMe sensor here), same ids as before
+    assert len(res["charts"]) == 14 and "depth_decode" not in res["charts"]
+    d = res["depth_charts"]["depth_decode"]
+    assert "Decode vs depth" in d and ">53 turns<" in d
+    svg = _svg(d)
+    assert f'viewBox="0 0 {res["ws"]["decode"]} 60"' in svg  # same plot width as the time charts
+    assert 'class="dp"' in svg and 'class="xh"' not in svg  # no time crosshair line
+    assert svg.count("<circle") == 4  # one dot per populated bin
+    assert svg.count('class="few"') == 1 and 'fill="var(--panel)"' in svg  # the n=2 bin is hollow
+    assert 'fill-opacity=".2"' in svg  # p25-p75 band for a single series
+    assert 'stroke-width="1.6"' in svg
+    assert "no data" not in svg
+    # x labels at the six interior edges, in K
+    xt = d[d.index('<div class="xt">') :]
+    assert [m for m in re.findall(r"%\">([^<]+)</span>", xt)][:6] == ["4K", "8K", "16K", "32K", "64K", "128K"]
+    # readouts name the bin, the median, the quartiles and n; "few" flagged
+    rd = res["dreads"]["depth_decode:1"]
+    assert rd.startswith("<b>4-8K</b>") and "35.0 t/s (31.0–38.0) · n=30" in rd and "few" not in rd
+    assert "22.0 t/s (20.0–24.0) · n=2 few" in res["dreads"]["depth_decode:3"]
+    assert "no data" in res["dreads"]["depth_decode:5"]
+    assert "900 t/s (850–950) · n=5" in res["dreads"]["depth_prefill:2"]
+    assert res["dleg"]["depth_decode"] == ""  # one series: no legend
+    p = res["depth_charts"]["depth_prefill"]
+    assert ">14 turns<" in p and _svg(p).count("<circle") == 3
+    # no depth payload at all (older server): both charts render their empty state
+    res2 = _run_charts(tmp_path, 900, 60, 60, [_rq(t)], [_sm(t)], [])
+    for cid, html in res2["depth_charts"].items():
+        assert "no data" in _svg(html) and "<circle" not in _svg(html), cid
+        assert '<span class="cur">—</span>' in html
+    assert len(res2["depth_charts"]) == 2
+    # empty series lists: the same empty state
+    res3 = _run_charts(tmp_path, 900, 60, 60, [], [], [], depth=_depth([], []))
+    assert all("no data" in _svg(h) for h in res3["depth_charts"].values())
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
+def test_depth_decode_split_by_concurrency_has_legend_and_no_band(tmp_path):
+    s1 = [_bin(20, 40.0, 36.0, 44.0), _bin(20, 35.0, 31.0, 38.0)] + [_bin(0, 0)] * 5
+    s2 = [_bin(10, 30.0, 27.0, 33.0), _bin(10, 26.0, 24.0, 28.0)] + [_bin(0, 0)] * 5
+    sq = [_bin(0, 0)] * 6 + [_bin(1, 9.0)]
+    series = [{"key": "1", "bins": s1}, {"key": "2", "bins": s2}, {"key": "?", "bins": sq}]
+    t = NOW_P - 300
+    res = _run_charts(
+        tmp_path, 900, 60, 60, [_rq(t)], [_sm(t)], [],
+        depth=_depth(series, [], split="concurrency"), dreads=[("depth_decode", 0), ("depth_decode", 6)],
+    )
+    d = res["depth_charts"]["depth_decode"]
+    svg = _svg(d)
+    assert 'fill-opacity=".2"' not in svg  # several lines: no band
+    assert svg.count('stroke-width="1.6"') == 2  # two lines (the "?" series has a single point)
+    assert svg.count("<circle") == 5
+    leg = res["dleg"]["depth_decode"]
+    assert "1 slot</span>" in leg and "2 slots</span>" in leg and "conc. unknown</span>" in leg
+    assert leg in d  # shown in the readout row while idle
+    rd = res["dreads"]["depth_decode:0"]
+    assert "1 slot 40.0 t/s (36.0–44.0) · n=20" in rd and "2 slots 30.0 t/s (27.0–33.0) · n=10" in rd
+    assert "conc. unknown 9.0 t/s · n=1 few" in res["dreads"]["depth_decode:6"]
+    # prefill with no rows shows its empty state beside it
+    assert "no data" in _svg(res["depth_charts"]["depth_prefill"])
+
+
+def test_depth_chart_pointer_handling_and_css():
+    html = dash.render_page()
+    js = _script(html)
+    assert "svg.cp,svg.dp{" in html and ".dh.on{display:block}" in html
+    # pointer moves over a depth chart highlight the bin on both depth charts and hold the cards still
+    assert "closest('svg.cp,svg.dp')" in js and "dhairs(true,i)" in js and "cs.hover=Date.now()" in js
+    assert "pointerleave',()=>{cs.hover=0;xhairs(false);dhairs(false);}" in js
+    # every string from the payload goes through esc()
+    body = js[js.index("function depthChart(") : js.index("function depthPos(")]
+    assert "${esc(labels[i]" in body and "${esc(o.title)}" in body and "esc(kl(s.key))" in body

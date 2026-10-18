@@ -107,10 +107,27 @@ def test_dashboard_serves_the_demo(tmp_path):
         hist = get("/api/history?window=86400")
         assert hist["summary"]["reqs"] > 0
         assert hist["samples"] and hist["request_series"]
+        dep = hist["depth"]
+        assert dep["decode"]["split"] == "concurrency" and len(dep["decode"]["series"]) >= 2
+        assert dep["prefill"]["n"] > 0
+        # the synthetic speeds fall with depth (two days of turns, bins with 5+ prefills)
+        dep2 = get("/api/depth?window=172800")
+        pre = dep2["prefill"]["series"][0]["bins"]
+        used = [b["p50"] for b in pre if b["n"] >= 5]
+        assert len(used) >= 3 and used[-1] < 0.9 * used[0]
+        assert dep2["decode"]["n"] > dep["decode"]["n"] > 0
         kinds = {e["kind"] for e in hist["events"]}
         assert {"down", "up", "stall", "stall_cleared"} <= kinds
         assert hist["cards"]["cache_source"]["kind"] == "gufo"
         assert hist["summary"]["failed"] > 0
+        with urllib.request.urlopen(url.rstrip("/") + "/metrics", timeout=10) as r:
+            assert r.headers["Content-Type"].startswith("text/plain; version=0.0.4")
+            prom = r.read().decode("utf-8")
+        assert "# TYPE slotpin_requests_total counter" in prom
+        assert 'slotpin_requests_total{route="chat",status="ok"} ' in prom
+        assert 'slotpin_decode_tokens_per_second_bucket{depth="4-8K",concurrency="1",le="+Inf"} ' in prom
+        assert "slotpin_slots_total 4" in prom and "slotpin_power_watts " in prom
+        assert not _scan(ROOT / "metrics.txt", prom)
         rq = get("/api/requests?window=86400")
         assert rq["total"] > 0 and rq["rows"]
         assert any(r["status"] == "failed" for r in get("/api/requests?window=86400&filter=failed")["rows"])
