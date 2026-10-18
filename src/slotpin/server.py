@@ -439,34 +439,76 @@ def _parse_usage_tail(tail: bytes) -> dict[str, Any]:
 _GUFO_CACHE_RE = re.compile(r'"gufo"\s*:\s*\{')
 
 
+def _json_object_at(text: str, start: int) -> dict[str, Any] | None:
+    """Parse the JSON object whose ``{`` is at ``text[start]``; None if cut off or invalid."""
+    depth = 0
+    in_str = esc = False
+    for i in range(start, len(text)):
+        ch = text[i]
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+        elif ch == '"':
+            in_str = True
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                try:
+                    obj = json.loads(text[start : i + 1])
+                except ValueError:
+                    return None
+                return obj if isinstance(obj, dict) else None
+    return None
+
+
 def _parse_gufo_tail(tail: bytes) -> dict[str, Any] | None:
     """Recover Gufo's own cache report (``usage.gufo``) from a response tail.
 
-    Same regex-over-the-tail approach as :func:`_parse_usage_tail`, scoped to
-    the LAST ``"gufo": {...}`` object (flat: scalars only, so it ends at the
-    first ``}``) -- the trailing ``timings`` repeats some of these key names.
-    ``None`` when the tail carries no such object.
+    Uses the LAST ``"gufo": {...}`` object in the tail (the trailing ``timings``
+    repeats some of these key names). Newer Gufo builds nest objects inside it
+    (``component_cache``), so the object is parsed as JSON with brace matching;
+    if it is cut off or malformed, the top-level keys are searched for in the
+    text after the marker instead. ``None`` when the tail carries no such object.
     """
     text = tail.decode("utf-8", "ignore")
     matches = list(_GUFO_CACHE_RE.finditer(text))
     if not matches:
         return None
-    start = matches[-1].end()
-    end = text.find("}", start)
-    seg = text[start:] if end < 0 else text[start:end]
+    obj = _json_object_at(text, matches[-1].end() - 1)
+    if obj is not None:
 
-    def _num(key: str) -> float | None:
-        m = re.search(rf'"{re.escape(key)}"\s*:\s*(-?[0-9.]+(?:[eE][-+]?\d+)?)', seg)
-        return float(m.group(1)) if m else None
+        def _num(key: str) -> float | None:
+            v = obj.get(key)
+            return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+
+        def _flag(key: str) -> bool:
+            return obj.get(key) is True
+
+        reason = obj.get("cache_miss_reason")
+        reason = reason if isinstance(reason, str) else None
+    else:
+        seg = text[matches[-1].end() :]
+
+        def _num(key: str) -> float | None:
+            m = re.search(rf'"{re.escape(key)}"\s*:\s*(-?[0-9.]+(?:[eE][-+]?\d+)?)', seg)
+            return float(m.group(1)) if m else None
+
+        def _flag(key: str) -> bool:
+            return re.search(rf'"{re.escape(key)}"\s*:\s*true', seg) is not None
+
+        m = re.search(r'"cache_miss_reason"\s*:\s*"([^"]*)"', seg)
+        reason = m.group(1) if m else None
 
     def _int(key: str) -> int | None:
         v = _num(key)
         return int(v) if v is not None else None
 
-    def _flag(key: str) -> bool:
-        return re.search(rf'"{re.escape(key)}"\s*:\s*true', seg) is not None
-
-    m = re.search(r'"cache_miss_reason"\s*:\s*"([^"]*)"', seg)
     if _flag("cache_disk_hit"):
         cache = "disk"
     elif _flag("cache_hit"):
@@ -475,7 +517,7 @@ def _parse_gufo_tail(tail: bytes) -> dict[str, Any] | None:
         cache = "miss"
     return {
         "upstream_cache": cache,
-        "upstream_cache_miss_reason": m.group(1) if m else None,
+        "upstream_cache_miss_reason": reason,
         "upstream_restore_ms": _num("cache_restore_ms"),
         "upstream_restore_bytes": _int("cache_restore_bytes"),
         "upstream_snapshot_ms": _num("cache_snapshot_ms"),
