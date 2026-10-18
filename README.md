@@ -63,7 +63,7 @@ DASH_DB=$HOME/slotpin-rollup.db \
 slotpin-dash
 ```
 
-Open `http://127.0.0.1:8091`. It shows whether the proxy and upstream are up, slot occupancy, throughput and time to first token, warm and cold rates, queue waits, GPU and host memory, temperatures, and optionally power and energy, live and over 1 hour, 24 hours, 72 hours and 7 days, with a request list. It never writes to the proxy's data and never serves prompt text. The variable list is in [docs/configuration.md](docs/configuration.md#dashboard-environment-variables); details are in [docs/dashboard.md](docs/dashboard.md).
+Open `http://127.0.0.1:8091`. It shows whether the proxy and upstream are up, slot occupancy, throughput and time to first token, how decode and prefill speed fall with context depth, warm and cold rates, queue waits, GPU and host memory, temperatures, and optionally power and energy, live and over 1 hour, 24 hours, 72 hours and 7 days, with a request list. It never writes to the proxy's data and never serves prompt text. The variable list is in [docs/configuration.md](docs/configuration.md#dashboard-environment-variables); details are in [docs/dashboard.md](docs/dashboard.md).
 
 ## Try the dashboard with demo data
 

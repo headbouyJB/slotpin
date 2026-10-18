@@ -9,6 +9,19 @@ stability guarantee yet).
 
 ## [Unreleased]
 
+### Added -- dashboard: decode and prefill speed against context depth
+
+- Two charts in the Performance group, under the Decode and Prefill time
+  charts: median t/s per `prompt_n` bin (`<4K`, `4-8K`, ... `>=128K`, a log2
+  axis) with the p25-p75 band, hollow dots for bins with fewer than three
+  turns, one line per concurrency bucket on multi-slot boxes, a shared bin
+  highlight and readout on hover. Decode counts turns with at least 64
+  generated tokens; prefill keeps the cards' 2,000-new-token rule.
+- `/api/history` gains `depth`; `GET /api/depth?window=` returns it alone.
+  `depth_series()` in `slotpin.dash`; see `docs/dashboard.md`.
+- The demo tool's synthetic speeds now fall with depth and a few sessions
+  start from a long document, so the new charts have data.
+
 ## [1.0.0a7] - 2026-10-10
 
 First public release. Everything since 1.0.0a1 is listed here.

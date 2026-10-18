@@ -107,6 +107,15 @@ def test_dashboard_serves_the_demo(tmp_path):
         hist = get("/api/history?window=86400")
         assert hist["summary"]["reqs"] > 0
         assert hist["samples"] and hist["request_series"]
+        dep = hist["depth"]
+        assert dep["decode"]["split"] == "concurrency" and len(dep["decode"]["series"]) >= 2
+        assert dep["prefill"]["n"] > 0
+        # the synthetic speeds fall with depth (two days of turns, bins with 5+ prefills)
+        dep2 = get("/api/depth?window=172800")
+        pre = dep2["prefill"]["series"][0]["bins"]
+        used = [b["p50"] for b in pre if b["n"] >= 5]
+        assert len(used) >= 3 and used[-1] < 0.9 * used[0]
+        assert dep2["decode"]["n"] > dep["decode"]["n"] > 0
         kinds = {e["kind"] for e in hist["events"]}
         assert {"down", "up", "stall", "stall_cleared"} <= kinds
         assert hist["cards"]["cache_source"]["kind"] == "gufo"

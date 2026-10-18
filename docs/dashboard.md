@@ -79,9 +79,13 @@ there are no non-`GET` routes.
 - `GET /api/state` — live JSON: health, current slots, current power/free-RAM,
   the last-15-min window, and the recent-request stream.
 - `GET /api/history?window=<seconds>` — a window summary, the chart series
-  (`samples`, `request_series`) and event markers, plus the legacy downsampled
+  (`samples`, `request_series`, `depth`) and event markers, plus the legacy downsampled
   `series` (the page no longer uses it). `window` (seconds, default 3600) is
   clamped to `[300, 8d]`.
+- `GET /api/depth?window=<seconds>` — only the `depth` object of `/api/history`
+  (decode and prefill speed per context-depth bin, see `depth_series` below),
+  same `window` handling, for scripts and curl. The page itself reads it from
+  `/api/history`.
 - `GET /api/requests?window=<sec>&from=&to=&offset=&limit=&filter=&route=` — the
   paged request list from the `requests` table (below), newest first. `window`
   clamped to `[300, 8d]` (default 3600); optional `from` / `to` (epoch seconds,
@@ -317,7 +321,8 @@ leaves the last cell empty. All charts have the same width and the same fixed
 60 px tall. Inline SVG, no
 library. Health: Failures per bucket (bars), Memory (stacked area: free, page
 cache, other used = total - free - page cache; swap used and GTT as lines).
-Performance: Decode, Prefill and TTFT (p50 line with a p50-p95 band), Requests
+Performance: Decode, Prefill and TTFT (p50 line with a p50-p95 band), Decode vs
+depth and Prefill vs depth (below, not time series), Requests
 per bucket (bars, ok + failed), Draft accept %. Cache: Cache hit %, Miss %,
 Restore ms (p50 line with band). System: GPU memory, Power, CPU temp and GPU
 temp (mean line plus the max as a lighter line), NVMe temp (max line; only when
@@ -360,6 +365,25 @@ a sensor exists). The number beside a chart title is the card's window value
   390 px) and are hidden with their cards when a group is collapsed.
 - Every API string put into the page (event detail, miss reasons) goes through
   `esc()`.
+
+**Depth charts** (Performance group, the row under the Decode and Prefill time
+charts; same cell size, plot width and y gutter as the other charts, so on a
+phone the two stack with the same x axis): decode t/s and prefill t/s against
+context depth, from `depth` in `/api/history` (`depth_series` below). The x
+axis is the seven `prompt_n` bins `<4K, 4-8K, 8-16K, 16-32K, 32-64K, 64-128K,
+>=128K` (K = 1024 tokens), equally spaced, so it is a log2 axis; ticks at the
+six edges. One point per populated bin at the median, joined by a line; with a
+single series the p25-p75 band is shaded. A bin with fewer than three turns
+is drawn as a hollow dot (and its readout says `few`); an empty bin is a gap.
+The number beside the title is the turns the chart is built from. On a box with
+more than one slot the decode chart has one line per concurrency bucket (`1
+slot`, `2 slots`, `3 slots`, `4+`, `conc. unknown`), the legend sits in the
+readout row while idle and there is no band. Moving over either depth chart
+shades that bin on both and fills both readouts (bin, median, quartiles, n);
+the time crosshair is not involved and the cards hold still as for it. No
+event markers. "no data" when the window has no qualifying turns (or the
+server predates the field). The two charts follow the window selector and
+refresh with `/api/history`.
 
 ## How the historical view works
 
@@ -415,6 +439,31 @@ rows; a miss is `upstream_cache == 'miss'`, or `served == 'cold'` without that
 field), `draft_accept_pct` and `miss_reasons` (`{reason: count}`, "unknown" when
 the reason is missing). Medians and p95 are the same `_median` / `_pctile` as
 `window_stats`; a measure with no data is `null`.
+
+### `depth_series` (speed against context depth, from the `requests` table)
+
+`slotpin.dash.depth_series(window_sec, now=None)` bins the window's ok rows
+by `prompt_n` (context depth at request time) with doubling edges
+`DEPTH_EDGES = 4096, 8192, 16384, 32768, 65536, 131072` into the seven bins
+`DEPTH_LABELS` (`<4K` .. `>=128K`). Per bin it reports `n` and the nearest-rank
+`p25` / `p75` and exact `p50` (same `_pctile` / `_median` as the cards; `null`
+when `n` is 0). Returned as `depth` by `/api/history` and alone by
+`/api/depth`:
+
+- `decode`: rows with `decode_tps > 0` and `completion_n >= 64`
+  (`DEPTH_DECODE_MIN_COMPLETION`; the decode speed of a shorter completion is
+  noise, so this is stricter than the Decode card). On a box with more than
+  one slot (`slots` in the proxy config, as the Concurrency card) `split` is
+  `"concurrency"` and `series` holds one entry per concurrency bucket seen,
+  in the order `1, 2, 3, 4+, ?`: a turn's mean `concurrency` rounded to the
+  nearest whole slot, `4+` above 3.5, `?` when the row has none. Otherwise
+  `split` is `null` and there is one series with key `all`.
+- `prefill`: rows with `prefill_tps > 0` and `prompt_n - cache_n >= 2000`
+  (`PREFILL_MIN_NEW`, the Prefill card's rule); one series, key `all`.
+- `n` on each is the number of rows used; `min_completion_n`, `min_new_tokens`
+  and `few_below` (3) carry the constants so the page need not repeat them.
+  Series with no rows are omitted, so an empty window has empty `series`
+  lists. The whole object is under 4 KB whatever the window.
 
 ### The `samples` table (1-minute sample rows)
 

@@ -995,6 +995,17 @@ FAIL_FIELDS = (
 )  # present on turn_failed
 FILTERS = ("all", "miss", "slow", "failed")
 _REQ_LATE_COLS = ("concurrency", "cacheram_restore", "restored_tokens")  # added after the first release; backfilled in place
+# "prefill t/s" counts a turn only when it processed at least this many new
+# tokens (prompt_n - cache_n): shorter prefills are fixed-cost dominated and a
+# cache hit would otherwise look like free depth. One threshold for the card,
+# the time series and the depth curve.
+PREFILL_MIN_NEW = 2000
+# depth curve: bins of prompt_n (context depth at request time), doubling edges
+DEPTH_EDGES = (4096, 8192, 16384, 32768, 65536, 131072)
+DEPTH_LABELS = ("<4K", "4-8K", "8-16K", "16-32K", "32-64K", "64-128K", ">=128K")
+DEPTH_DECODE_MIN_COMPLETION = 64  # decode t/s of a shorter completion is noise
+DEPTH_FEW = 3  # a bin with fewer turns is reported but flagged "few"
+CONC_BUCKETS = ("1", "2", "3", "4+")
 
 
 def _req_val(col, v):
@@ -1181,7 +1192,7 @@ def request_series(window_sec, now=None):
     Buckets are bucket_width(window_sec) wide (the rule sample_series uses);
     buckets with no rows are omitted. `n` counts ok rows, `failed` failed rows.
     Percentiles follow window_stats (_median, _pctile); prefill only counts ok
-    rows with prompt_n - cache_n >= 2000. cache_hit_pct is cached/prompt tokens,
+    rows with prompt_n - cache_n >= PREFILL_MIN_NEW. cache_hit_pct is cached/prompt tokens,
     miss_pct is misses/classified rows (Gufo: upstream_cache == 'miss'; else
     served == 'cold'), miss_reasons maps reason -> count over the misses.
     """
@@ -1227,7 +1238,7 @@ def request_series(window_sec, now=None):
             if r["prefill_tps"]
             and r["prompt_n"] is not None
             and r["cache_n"] is not None
-            and r["prompt_n"] - r["cache_n"] >= 2000
+            and r["prompt_n"] - r["cache_n"] >= PREFILL_MIN_NEW
         ]
         ttft = [r["ttft_s"] for r in ok if r["ttft_s"] is not None]
         rst = [r["upstream_restore_ms"] for r in ok if r["upstream_restore_ms"] is not None]
@@ -1267,6 +1278,106 @@ def request_series(window_sec, now=None):
             }
         )
     return pts
+
+
+def depth_bin(prompt_n):
+    """Index into DEPTH_LABELS for a context depth, or None when unknown."""
+    if prompt_n is None:
+        return None
+    i = 0
+    while i < len(DEPTH_EDGES) and prompt_n >= DEPTH_EDGES[i]:
+        i += 1
+    return i
+
+
+def conc_bucket(c):
+    """A turn's mean concurrency -> "1", "2", "3", "4+" (nearest whole slot), "?" if unknown."""
+    if c is None:
+        return "?"
+    return CONC_BUCKETS[max(0, min(len(CONC_BUCKETS) - 1, int(c + 0.5) - 1))]
+
+
+def _depth_bins(groups):
+    """{bin index: [values]} -> one dict per DEPTH_LABELS bin (n and p25/p50/p75)."""
+    out = []
+    for i in range(len(DEPTH_LABELS)):
+        vals = groups.get(i, [])
+        out.append(
+            {
+                "n": len(vals),
+                "p25": _r(_pctile(vals, 25), 2),
+                "p50": _r(_median(vals), 2),
+                "p75": _r(_pctile(vals, 75), 2),
+            }
+        )
+    return out
+
+
+def depth_series(window_sec, now=None):
+    """Decode and prefill speed against context depth, from the requests table.
+
+    Ok rows of the window are binned by prompt_n (DEPTH_EDGES, labels
+    DEPTH_LABELS). decode: rows with decode_tps > 0 and completion_n >=
+    DEPTH_DECODE_MIN_COMPLETION; on a box with more than one slot the decode
+    series is split by conc_bucket(concurrency) so regimes do not mix (one
+    series "all" otherwise). prefill: rows with prefill_tps > 0 and prompt_n -
+    cache_n >= PREFILL_MIN_NEW (the Prefill card's rule). Every series carries
+    one entry per bin ({n, p25, p50, p75}; percentiles null when n is 0); a bin
+    with n below DEPTH_FEW is for the page to flag. Series with no rows are
+    omitted, so an empty window gives empty series lists.
+    """
+    now = time.time() if now is None else now
+    try:
+        con = _db()
+        try:
+            cur = con.execute(
+                "SELECT prompt_n, cache_n, completion_n, decode_tps, prefill_tps, concurrency "
+                "FROM requests WHERE ts >= ? AND ts <= ? AND status = 'ok' "
+                "AND prompt_n IS NOT NULL",
+                (now - window_sec, now),
+            )
+            rows = cur.fetchall()
+        finally:
+            con.close()
+    except Exception as e:
+        print("depth_series error:", e)
+        rows = []
+    split = _slot_count() > 1
+    dec = {}
+    pre = {}
+    n_dec = n_pre = 0
+    for prompt_n, cache_n, completion_n, decode_tps, prefill_tps, conc in rows:
+        b = depth_bin(prompt_n)
+        if decode_tps and decode_tps > 0 and (completion_n or 0) >= DEPTH_DECODE_MIN_COMPLETION:
+            key = conc_bucket(conc) if split else "all"
+            dec.setdefault(key, {}).setdefault(b, []).append(decode_tps)
+            n_dec += 1
+        if (
+            prefill_tps
+            and prefill_tps > 0
+            and cache_n is not None
+            and prompt_n - cache_n >= PREFILL_MIN_NEW
+        ):
+            pre.setdefault(b, []).append(prefill_tps)
+            n_pre += 1
+    order = ("all", *CONC_BUCKETS, "?")
+    return {
+        "window_sec": window_sec,
+        "edges": list(DEPTH_EDGES),
+        "bins": list(DEPTH_LABELS),
+        "few_below": DEPTH_FEW,
+        "decode": {
+            "n": n_dec,
+            "min_completion_n": DEPTH_DECODE_MIN_COMPLETION,
+            "split": "concurrency" if split else None,
+            "series": [{"key": k, "bins": _depth_bins(dec[k])} for k in order if k in dec],
+        },
+        "prefill": {
+            "n": n_pre,
+            "min_new_tokens": PREFILL_MIN_NEW,
+            "series": [{"key": "all", "bins": _depth_bins(pre)}] if pre else [],
+        },
+    }
 
 
 def _parse_req_params(q, now=None):
@@ -1498,7 +1609,7 @@ def window_stats(window_sec, now=None):
         if r["prefill_tps"]
         and r["prompt_n"] is not None
         and r["cache_n"] is not None
-        and r["prompt_n"] - r["cache_n"] >= 2000
+        and r["prompt_n"] - r["cache_n"] >= PREFILL_MIN_NEW
     ]
     ttft = col(ok, "ttft_s")
     total = len(rows)
@@ -2229,6 +2340,7 @@ def build_history(window_sec):
         "series": series(),
         "samples": sample_series(window_sec, now),
         "request_series": request_series(window_sec, now),
+        "depth": depth_series(window_sec, now),
         "events": events,
     }
 
@@ -2251,7 +2363,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if u.path == "/api/state":
                 self._send(200, json.dumps(build_state()).encode(), "application/json")
-            elif u.path == "/api/history":
+            elif u.path in ("/api/history", "/api/depth"):
                 q = parse_qs(u.query)
                 try:
                     win = int(q.get("window", ["3600"])[0])
@@ -2260,7 +2372,8 @@ class Handler(BaseHTTPRequestHandler):
                     self._send(400, body.encode(), "application/json")
                     return
                 win = max(300, min(win, RETENTION_DAYS * 86400))
-                self._send(200, json.dumps(build_history(win)).encode(), "application/json")
+                obj = build_history(win) if u.path == "/api/history" else depth_series(win)
+                self._send(200, json.dumps(obj).encode(), "application/json")
             elif u.path == "/api/requests":
                 code, obj = query_requests(parse_qs(u.query))
                 self._send(code, json.dumps(obj).encode(), "application/json")
@@ -2368,7 +2481,9 @@ h2{font-size:12px;text-transform:uppercase;letter-spacing:1px;color:var(--dim);m
 .cplot{display:flex;gap:6px;min-width:0}
 .yax{flex:0 0 40px;display:flex;flex-direction:column;justify-content:space-between;height:60px;font-size:10px;line-height:1;color:var(--dim);text-align:right}
 .cpm{flex:1;min-width:0}
-svg.cp{display:block;width:100%;height:60px;touch-action:pan-y;cursor:crosshair}
+svg.cp,svg.dp{display:block;width:100%;height:60px;touch-action:pan-y;cursor:crosshair}
+.dh{display:none;fill:var(--fg);fill-opacity:.08;pointer-events:none}.dh.on{display:block}
+.chart .rd .dl{color:var(--dim)}.chart .rd .dl i{display:inline-block;width:10px;height:2px;vertical-align:middle;margin-right:4px}
 .gl{stroke:var(--line);stroke-width:1;fill:none}
 .nod{fill:var(--dim);font-size:11px}
 .xt{position:relative;height:14px;font-size:10px;color:var(--dim);margin-top:2px}
@@ -2698,6 +2813,60 @@ function mkChart(o,ctx){
     `<div class="rd"></div><div class="cplot"><div class="yax"><span>${esc(f(ymax))}</span><span>${esc(f(ymin))}</span></div>`+
     `<div class="cpm"><svg class="cp" viewBox="0 0 ${W} ${CH_H}" preserveAspectRatio="none" role="img" aria-label="${esc(o.title)} over time">${g}</svg><div class="xt">${xt}</div></div></div></div>`;
 }
+// ---- depth charts: speed against context depth, one point per prompt_n bin (equal spacing = log2) ----
+const DPW={};   // chart id -> {rd(bin index), leg}
+const DCOL={all:null,'1':'#39d3bb','2':'#ffb454','3':'#5aa2ff','4+':'#ff8fc7','?':'#7d8da0'};
+// o: {id,title,col,unit,d,dep} ; dep: {n,series:[{key,bins:[{n,p25,p50,p75}]}]} from /api/history depth
+function depthChart(o,ctx,labels,edges,few){
+  const {W}=ctx, pw=W-2*PADX, ph=CH_H-PADT-PADB, nb=labels.length, dep=o.dep||{}, ser=Array.isArray(dep.series)?dep.series:[];
+  const bx=i=>PADX+(i+0.5)/nb*pw, ex=k=>PADX+k/nb*pw;
+  let m=0; ser.forEach(s=>s.bins.forEach(b=>{if(finite(b.p50))m=Math.max(m,b.p50,finite(b.p75)?b.p75:0);}));
+  const ymax=m>0?m:1, Y=v=>PADT+(1-Math.max(0,Math.min(ymax,v))/ymax)*ph;
+  let g=`<path class="gl" d="M0 ${Y(0).toFixed(1)}H${W}M0 ${Y(ymax).toFixed(1)}H${W}${edges.map((_,k)=>'M'+ex(k+1).toFixed(1)+' '+PADT+'V'+(CH_H-PADB)).join('')}"/>`;
+  g+=`<rect class="dh" x="0" y="0" width="${(pw/nb).toFixed(1)}" height="${CH_H}"/>`;
+  const band=ser.length===1, cols={};
+  ser.forEach((s,si)=>{
+    const col=DCOL[s.key]||o.col; cols[s.key]=col;
+    const pts=s.bins.map((b,i)=>({i,b})).filter(p=>finite(p.b.p50));
+    if(!pts.length)return;
+    let line='',bd='',dots='';
+    pts.forEach((p,k)=>{line+=(k?'L':'M')+bx(p.i).toFixed(1)+' '+Y(p.b.p50).toFixed(1);});
+    if(band&&pts.length>1){
+      bd=pts.map((p,k)=>(k?'L':'M')+bx(p.i).toFixed(1)+' '+Y(finite(p.b.p75)?p.b.p75:p.b.p50).toFixed(1)).join('')+
+         [...pts].reverse().map(p=>'L'+bx(p.i).toFixed(1)+' '+Y(finite(p.b.p25)?p.b.p25:p.b.p50).toFixed(1)).join('')+'Z';}
+    pts.forEach(p=>{const hollow=p.b.n<few;
+      dots+=`<circle cx="${bx(p.i).toFixed(1)}" cy="${Y(p.b.p50).toFixed(1)}" r="3" fill="${hollow?'var(--panel)':col}" stroke="${col}" stroke-width="1.5"${hollow?' class="few"':''}/>`;});
+    if(bd)g+=`<path d="${bd}" fill="${col}" fill-opacity=".2" stroke="none"/>`;
+    if(pts.length>1)g+=`<path d="${line}" stroke="${col}" stroke-width="1.6" fill="none" stroke-linejoin="round"/>`;
+    g+=dots;
+  });
+  if(!ser.length)g+=`<text x="${W/2}" y="${CH_H/2+4}" text-anchor="middle" class="nod">no data</text>`;
+  const f=v=>fnum(v,o.d);
+  const xt=edges.map((e,k)=>`<span style="left:${(100*ex(k+1)/W).toFixed(1)}%">${esc(e>=1024?(e/1024)+'K':e)}</span>`).join('');
+  const kl=k=>k==='all'?'':(k==='?'?'conc. unknown':(k+' slot'+(k==='1'?'':'s')));
+  const leg=ser.length>1?`<span class="dl">${ser.map(s=>`<span><i style="background:${cols[s.key]}"></i>${esc(kl(s.key))}</span>`).join(' · ')}</span>`:'';
+  DPW[o.id]={nb,leg,
+    rd(i){const parts=[];
+      ser.forEach(s=>{const b=s.bins[i];if(!b||!finite(b.p50))return;
+        parts.push(`<span style="color:${cols[s.key]}">${esc((kl(s.key)?kl(s.key)+' ':'')+f(b.p50)+' '+o.unit)}`+
+          (finite(b.p25)&&finite(b.p75)&&b.n>1?esc(' ('+f(b.p25)+'–'+f(b.p75)+')'):'')+esc(' · n='+b.n+(b.n<few?' few':''))+'</span>');});
+      return `<b>${esc(labels[i]||'')}</b> `+(parts.join(' · ')||'<span class="mono">no data</span>');}};
+  return `<div class="chart depth" data-id="${esc(o.id)}"><div class="t"><span>${esc(o.title)}</span><span class="cur">${esc(dep.n?fint(dep.n)+' turns':'—')}</span></div>`+
+    `<div class="rd">${leg}</div><div class="cplot"><div class="yax"><span>${esc(f(ymax))}</span><span>${esc(f(0))}</span></div>`+
+    `<div class="cpm"><svg class="dp" viewBox="0 0 ${W} ${CH_H}" preserveAspectRatio="none" role="img" aria-label="${esc(o.title)}">${g}</svg><div class="xt">${xt}</div></div></div></div>`;
+}
+function depthPos(e,svg){
+  const box=svg.closest('.chart'), sp=box&&DPW[box.dataset.id]; if(!sp)return null;
+  const r=svg.getBoundingClientRect(), W=+svg.getAttribute('viewBox').split(' ')[2], vx=(e.clientX-r.left)/(r.width||W)*W;
+  return Math.max(0,Math.min(sp.nb-1,Math.floor((vx-PADX)/(W-2*PADX)*sp.nb)));
+}
+function dhairs(on,i){
+  [...$('cards').querySelectorAll('.chart.depth')].forEach(el=>{
+    const sp=DPW[el.dataset.id], hl=el.querySelector('.dh'), rd=el.querySelector('.rd'); if(!sp||!hl)return;
+    if(on){const W=+el.querySelector('svg.dp').getAttribute('viewBox').split(' ')[2];
+      hl.setAttribute('x',(PADX+i/sp.nb*(W-2*PADX)).toFixed(1));hl.classList.add('on');rd.innerHTML=sp.rd(i);}
+    else{hl.classList.remove('on');rd.innerHTML=sp.leg;}});
+}
 const LEG=`<div class="leg"><span><i class="lm m-down"></i>down</span><span><i class="lm m-up"></i>up</span><span><i class="lm m-stall"></i>stall</span><span><i class="lm m-stall_cleared"></i>stall cleared</span><span><i class="lm m-fail"></i>failures</span><span class="mono">click a marker to filter the turn list</span></div>`;
 // v: window values from the cards, as display strings
 function chartBlocks(hi,v,st){
@@ -2747,10 +2916,15 @@ function chartBlocks(hi,v,st){
     lines:[{lab:'max',col:C.w,w:sw,pts:pts(sm,p=>p[max]),light:true,fmt:p=>fnum(p.v,1)+'°C'}].concat(mean?
       [{lab:'mean',col:C.w,w:sw,pts:pts(sm,p=>p[mean]),fmt:p=>fnum(p.v,1)+'°C'}]:[])},ctx);
   const hasNvme=sm.some(p=>finite(p.nvme_temp_max_c));
+  // depth charts: decode and prefill speed per prompt_n bin, right under their time charts
+  const dp=(hi.depth&&typeof hi.depth==='object')?hi.depth:{}, dl=Array.isArray(dp.bins)?dp.bins:[], de=Array.isArray(dp.edges)?dp.edges:[], few=finite(dp.few_below)?dp.few_below:3;
+  const depthDec=depthChart({id:'depth_decode',title:'Decode vs depth',col:C.a,unit:'t/s',d:1,dep:dp.decode},ctx,dl,de,few);
+  const depthPre=depthChart({id:'depth_prefill',title:'Prefill vs depth',col:C.c,unit:'t/s',d:0,dep:dp.prefill},ctx,dl,de,few);
   const cg=(...charts)=>LEG+'<div class="chgrid">'+charts.join('')+'</div>';
   const html={
     health:cg(barChart('failures','Failures per bucket',v.fail,p=>p.failed,C.b,true),memChart),
     perf:cg(bandLine('decode','Decode',v.decode,'decode',1,'t/s',C.a),bandLine('prefill','Prefill',v.prefill,'prefill',0,'t/s',C.c),
+      depthDec,depthPre,
       bandLine('ttft','TTFT',v.ttft,'ttft',2,'s',C.w),barChart('requests','Requests per bucket',v.req,p=>p.n+p.failed,C.a),
       pctChart('draft','Draft accept %',v.draft,'draft_accept_pct',C.g)),
     cache:cg(pctChart('cachehit','Cache hit %',v.hit,'cache_hit_pct',C.c),
@@ -2779,10 +2953,11 @@ function xhairs(on,t){
       ln.setAttribute('x1',x.toFixed(1));ln.setAttribute('x2',x.toFixed(1));ln.classList.add('on');rd.innerHTML=sp.rd(t);}
     else{ln.classList.remove('on');rd.innerHTML='';}});
 }
-$('cards').addEventListener('pointermove',e=>{const svg=e.target.closest&&e.target.closest('svg.cp');
-  if(!svg){if(cs.hover){cs.hover=0;xhairs(false);}return;}
-  const p=chartPos(e,svg);if(!p)return;cs.hover=Date.now();xhairs(true,p.t);});
-$('cards').addEventListener('pointerleave',()=>{cs.hover=0;xhairs(false);});
+$('cards').addEventListener('pointermove',e=>{const svg=e.target.closest&&e.target.closest('svg.cp,svg.dp');
+  if(!svg){if(cs.hover){cs.hover=0;xhairs(false);dhairs(false);}return;}
+  if(svg.classList.contains('dp')){const i=depthPos(e,svg);if(i==null)return;cs.hover=Date.now();xhairs(false);dhairs(true,i);return;}
+  const p=chartPos(e,svg);if(!p)return;cs.hover=Date.now();dhairs(false);xhairs(true,p.t);});
+$('cards').addEventListener('pointerleave',()=>{cs.hover=0;xhairs(false);dhairs(false);});
 $('cards').addEventListener('click',e=>{const svg=e.target.closest&&e.target.closest('svg.cp');
   if(!svg)return;const p=chartPos(e,svg);if(!p)return;const h=p.sp.hit(p.vx);if(h)setRange(h.from,h.to);});
 if(typeof window!=='undefined'&&window.addEventListener){let rt=null;
