@@ -365,3 +365,24 @@ def test_gufo_unavailable_probe_is_inconclusive(make_config, fake_upstream):
     assert rd.check_once() is False
     fake_upstream.set_models(_models())
     assert rd.check_once() is False  # back, unchanged
+
+
+def test_parse_nested_component_cache_object():
+    # Newer Gufo builds put a nested "component_cache" object first in
+    # usage.gufo; the flat first-"}" cut used to lose every top-level key,
+    # so every turn read as a miss.
+    tail = _fx("gufo_stream_component.sse")[-16384:]
+    g = _parse_gufo_tail(tail)
+    assert g["upstream_cache"] == "memory"
+    assert g["upstream_cache_miss_reason"] is None
+    assert g["upstream_restore_ms"] == pytest.approx(2.274684)
+    assert g["upstream_restore_bytes"] == 134175052
+    assert g["upstream_snapshot_bytes"] == 0
+
+
+def test_parse_cut_off_gufo_object_falls_back_to_key_search():
+    tail = _fx("gufo_stream_component.sse")
+    i = tail.rindex(b'"gufo":{')
+    j = tail.index(b'"cache_hit":true', i)
+    cut = tail[: j + len(b'"cache_hit":true')]  # object never closes
+    assert _parse_gufo_tail(cut)["upstream_cache"] == "memory"
