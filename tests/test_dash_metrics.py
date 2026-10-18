@@ -314,6 +314,21 @@ def test_counters_survive_pruning_and_restart(env):
     assert _val(third, "slotpin_requests_total", route="chat", status="ok") == 3
 
 
+def test_failed_fold_does_not_block_pruning(env, monkeypatch):
+    _load(env, [_turn(100), _turn(200)])
+
+    def boom(con, cutoff):
+        raise RuntimeError("fold failed")
+
+    monkeypatch.setattr(dash, "_prom_fold_expiring", boom)
+    monkeypatch.setattr(time, "time", lambda: NOW + 9 * 86400)
+    dash._flush_db()
+    con = dash._db()
+    assert con.execute("SELECT COUNT(*) FROM requests").fetchone()[0] == 0  # pruned anyway
+    assert con.execute("SELECT COUNT(*) FROM prom_base").fetchone()[0] == 0  # fold undone
+    con.close()
+
+
 def test_gauges_match_api_state_and_http_content_type(env):
     _load(env, [_turn(100)])
     dash._live.update(

@@ -827,7 +827,7 @@ def _flush_db():
         cutoff = time.time() - RETENTION_DAYS * 86400
         con.execute("DELETE FROM buckets WHERE bucket < ?", (cutoff,))
         con.execute("DELETE FROM samples WHERE bucket < ?", (cutoff,))
-        _prom_fold_expiring(con, cutoff)
+        _prom_fold_safe(con, cutoff)
         con.execute("DELETE FROM requests WHERE ts < ?", (cutoff,))
         con.execute("DELETE FROM kv_events WHERE ts < ?", (cutoff,))
         con.commit()
@@ -1180,7 +1180,7 @@ def backfill_requests():
                     f"UPDATE requests SET {col}=? WHERE key=? AND {col} IS NULL",
                     [(r[i], r[0]) for r in rows if r[i] is not None],
                 )
-            _prom_fold_expiring(con, cutoff)
+            _prom_fold_safe(con, cutoff)
             con.execute("DELETE FROM requests WHERE ts < ?", (cutoff,))
             con.execute("DELETE FROM kv_events WHERE ts < ?", (cutoff,))
         con.close()
@@ -2502,6 +2502,24 @@ def _prom_fold_expiring(con, cutoff):
         "ON CONFLICT(key) DO UPDATE SET v = v + excluded.v",
         list(_prom_row_counts(rows).items()),
     )
+
+
+def _prom_fold_safe(con, cutoff):
+    """_prom_fold_expiring without taking the caller down with it.
+
+    The fold runs inside the flush/backfill transaction; if it failed there,
+    the whole flush (buckets, samples, offset) would roll back and retry
+    forever. On error the fold is undone to a savepoint and pruning goes
+    ahead: the pruned rows then drop out of the counters, which a scraper
+    sees as an ordinary counter reset.
+    """
+    con.execute("SAVEPOINT prom_fold")
+    try:
+        _prom_fold_expiring(con, cutoff)
+    except Exception as e:
+        con.execute("ROLLBACK TO prom_fold")
+        print("prom fold skipped:", e)
+    con.execute("RELEASE prom_fold")
 
 
 def _prom_counts():
