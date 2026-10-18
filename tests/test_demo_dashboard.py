@@ -120,6 +120,14 @@ def test_dashboard_serves_the_demo(tmp_path):
         assert {"down", "up", "stall", "stall_cleared"} <= kinds
         assert hist["cards"]["cache_source"]["kind"] == "gufo"
         assert hist["summary"]["failed"] > 0
+        with urllib.request.urlopen(url.rstrip("/") + "/metrics", timeout=10) as r:
+            assert r.headers["Content-Type"].startswith("text/plain; version=0.0.4")
+            prom = r.read().decode("utf-8")
+        assert "# TYPE slotpin_requests_total counter" in prom
+        assert 'slotpin_requests_total{route="chat",status="ok"} ' in prom
+        assert 'slotpin_decode_tokens_per_second_bucket{depth="4-8K",concurrency="1",le="+Inf"} ' in prom
+        assert "slotpin_slots_total 4" in prom and "slotpin_power_watts " in prom
+        assert not _scan(ROOT / "metrics.txt", prom)
         rq = get("/api/requests?window=86400")
         assert rq["total"] > 0 and rq["rows"]
         assert any(r["status"] == "failed" for r in get("/api/requests?window=86400&filter=failed")["rows"])

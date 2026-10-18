@@ -22,6 +22,19 @@ stability guarantee yet).
 - The demo tool's synthetic speeds now fall with depth and a few sessions
   start from a long document, so the new charts have data.
 
+### Added -- dashboard: `GET /metrics` for Prometheus / Grafana
+
+- Prometheus text exposition (0.0.4) from the dashboard process, stdlib only:
+  `slotpin_*` request, token, draft, failure and energy counters; TTFT,
+  duration and queue-wait histograms by lane; decode and prefill speed
+  histograms by context-depth bin (the depth chart's bins, decode also by
+  concurrency bucket); gauges for proxy/upstream state, slots, host memory,
+  GTT, power, temperatures; the plug's cumulative kWh as a counter. Labels are
+  bounded, never prefix, slot, request id or prompt text.
+- Counters are monotonic across restarts and retention: rows about to be
+  pruned are folded into a new `prom_base` table before the delete. README
+  has a scrape config and the depth-curve panel queries.
+
 ## [1.0.0a7] - 2026-10-10
 
 First public release. Everything since 1.0.0a1 is listed here.

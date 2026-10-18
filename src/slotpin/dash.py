@@ -757,6 +757,7 @@ def _db():
     if "bytes" not in {r[1] for r in con.execute("PRAGMA table_info(kv_events)")}:
         con.execute("ALTER TABLE kv_events ADD COLUMN bytes INTEGER")
     con.execute("CREATE INDEX IF NOT EXISTS kv_events_ts ON kv_events(ts)")
+    con.execute("CREATE TABLE IF NOT EXISTS prom_base(key TEXT PRIMARY KEY, v REAL)")
     return con
 
 
@@ -826,6 +827,7 @@ def _flush_db():
         cutoff = time.time() - RETENTION_DAYS * 86400
         con.execute("DELETE FROM buckets WHERE bucket < ?", (cutoff,))
         con.execute("DELETE FROM samples WHERE bucket < ?", (cutoff,))
+        _prom_fold_expiring(con, cutoff)
         con.execute("DELETE FROM requests WHERE ts < ?", (cutoff,))
         con.execute("DELETE FROM kv_events WHERE ts < ?", (cutoff,))
         con.commit()
@@ -1178,6 +1180,7 @@ def backfill_requests():
                     f"UPDATE requests SET {col}=? WHERE key=? AND {col} IS NULL",
                     [(r[i], r[0]) for r in rows if r[i] is not None],
                 )
+            _prom_fold_expiring(con, cutoff)
             con.execute("DELETE FROM requests WHERE ts < ?", (cutoff,))
             con.execute("DELETE FROM kv_events WHERE ts < ?", (cutoff,))
         con.close()
@@ -2345,6 +2348,282 @@ def build_history(window_sec):
     }
 
 
+# ---------------- Prometheus exposition (/metrics) ----------------
+# Counter-type families (counters and histograms) are computed from request
+# rows by _prom_row_counts. Rows live in the requests table for RETENTION_DAYS;
+# just before a row is pruned its contribution is folded into prom_base (same
+# function, same keys), so every exposed counter is base + live rows and never
+# falls: not on a dashboard restart, not when rows age out. Only deleting the
+# database resets them. Gauges are read from build_state(), the /api/state body.
+# Labels are bounded: route (the operator's lane names), status, reason (the
+# proxy's failure reasons), depth (DEPTH_LABELS), concurrency (1/2/3/4+/?).
+PROM_TTFT_BUCKETS = (0.1, 0.25, 0.5, 1, 2, 5, 10, 30, 60)
+PROM_DURATION_BUCKETS = (1, 2, 5, 10, 30, 60, 120, 300, 600)
+PROM_QUEUE_BUCKETS = (0.01, 0.05, 0.1, 0.5, 1, 5, 10, 30, 60)
+PROM_DECODE_BUCKETS = (2, 5, 10, 15, 20, 30, 40, 60, 80, 120)
+PROM_PREFILL_BUCKETS = (50, 100, 200, 400, 800, 1600, 3200, 6400)
+# (name, type, help); exposition order. Histogram names are the family name.
+PROM_FAMILIES = (
+    ("slotpin_requests_total", "counter", "Turns recorded by the proxy, by lane and outcome."),
+    ("slotpin_failures_total", "counter", "Failed turns by the proxy's failure reason."),
+    ("slotpin_prompt_tokens_total", "counter", "Prompt tokens of ok turns (prompt_n), by lane."),
+    ("slotpin_cached_tokens_total", "counter", "Prompt tokens served from cache (cache_n), by lane."),
+    (
+        "slotpin_generated_tokens_total",
+        "counter",
+        "Generated tokens of ok turns (completion_n), by lane.",
+    ),
+    ("slotpin_draft_proposed_tokens_total", "counter", "Draft tokens proposed (draft_n)."),
+    ("slotpin_draft_accepted_tokens_total", "counter", "Draft tokens accepted (draft_n_accepted)."),
+    (
+        "slotpin_turn_energy_wh_total",
+        "counter",
+        "Energy attributed to ok turns (energy_fair_wh, else energy_turn_wh), by lane.",
+    ),
+    ("slotpin_ttft_seconds", "histogram", "Time to first token of ok turns, by lane."),
+    ("slotpin_request_duration_seconds", "histogram", "Duration of ok turns, by lane."),
+    ("slotpin_queue_wait_seconds", "histogram", "Scheduler queue wait of ok turns, by lane."),
+    (
+        "slotpin_decode_tokens_per_second",
+        "histogram",
+        "Decode speed of ok turns with at least 64 generated tokens, by context depth bin"
+        " (prompt_n) and concurrency bucket.",
+    ),
+    (
+        "slotpin_prefill_tokens_per_second",
+        "histogram",
+        "Prefill speed of ok turns with at least 2000 new tokens (prompt_n - cache_n),"
+        " by context depth bin.",
+    ),
+    ("slotpin_proxy_up", "gauge", "1 when the proxy port accepts connections."),
+    ("slotpin_upstream_up", "gauge", "1 when the upstream answers /slots or completed a turn recently."),
+    ("slotpin_upstream_stalled", "gauge", "1 while the stall detector reports the upstream stalled."),
+    ("slotpin_slots_total", "gauge", "Slots reported by the upstream."),
+    ("slotpin_slots_busy", "gauge", "Slots currently processing."),
+    ("slotpin_last_completion_age_seconds", "gauge", "Seconds since the newest ok turn."),
+    ("slotpin_host_memory_total_bytes", "gauge", "Host MemTotal."),
+    ("slotpin_host_memory_free_bytes", "gauge", "Host MemFree."),
+    ("slotpin_host_memory_available_bytes", "gauge", "Host MemAvailable."),
+    ("slotpin_host_swap_used_bytes", "gauge", "Host swap in use."),
+    ("slotpin_gpu_gtt_used_bytes", "gauge", "GPU GTT memory in use (amdgpu)."),
+    ("slotpin_power_watts", "gauge", "Whole-box power from the energy feed."),
+    (
+        "slotpin_energy_kwh_total",
+        "counter",
+        "Whole-box cumulative energy from the energy feed's counter (kWh).",
+    ),
+    ("slotpin_temperature_celsius", "gauge", "Sensor temperature, by sensor (cpu, gpu, nvme)."),
+)
+
+
+def _prom_key(name, labels):
+    """Stable text key for one sample: name + labels as an ordered list of pairs."""
+    return json.dumps([name, list(labels)], separators=(",", ":"))
+
+
+def _prom_hist(counts, family, labels, buckets, v):
+    """Add one observation to a histogram's cumulative bucket, sum and count samples.
+
+    Every bucket of the label set is touched (+= 0 creates the key), so the
+    exposition always carries the full bucket list, zero counts included."""
+    for le in buckets:
+        counts[_prom_key(family + "_bucket", (*labels, ("le", repr(float(le)))))] += 1 if v <= le else 0
+    counts[_prom_key(family + "_bucket", (*labels, ("le", "+Inf")))] += 1
+    counts[_prom_key(family + "_sum", labels)] += v
+    counts[_prom_key(family + "_count", labels)] += 1
+
+
+def _prom_row_counts(rows):
+    """Request rows (dicts) -> Counter {sample key: value} for every counter-type family."""
+    c = collections.Counter()
+    for r in rows:
+        route = (("route", r["route"] or "unknown"),)
+        c[_prom_key("slotpin_requests_total", (*route, ("status", r["status"] or "unknown")))] += 1
+        if r["status"] != "ok":
+            c[_prom_key("slotpin_failures_total", (("reason", r["fail_reason"] or "unknown"),))] += 1
+            continue
+        if r["prompt_n"] is not None:
+            c[_prom_key("slotpin_prompt_tokens_total", route)] += r["prompt_n"]
+        if r["cache_n"] is not None:
+            c[_prom_key("slotpin_cached_tokens_total", route)] += r["cache_n"]
+        if r["completion_n"] is not None:
+            c[_prom_key("slotpin_generated_tokens_total", route)] += r["completion_n"]
+        if r["draft_n"]:
+            c[_prom_key("slotpin_draft_proposed_tokens_total", ())] += r["draft_n"]
+            c[_prom_key("slotpin_draft_accepted_tokens_total", ())] += r["draft_n_accepted"] or 0
+        wh = r["energy_fair_wh"] if r["energy_fair_wh"] is not None else r["energy_turn_wh"]
+        if wh is not None:
+            c[_prom_key("slotpin_turn_energy_wh_total", route)] += wh
+        if r["ttft_s"] is not None:
+            _prom_hist(c, "slotpin_ttft_seconds", route, PROM_TTFT_BUCKETS, r["ttft_s"])
+        if r["dur_s"] is not None:
+            _prom_hist(c, "slotpin_request_duration_seconds", route, PROM_DURATION_BUCKETS, r["dur_s"])
+        if r["queue_wait_ms"] is not None:
+            _prom_hist(
+                c, "slotpin_queue_wait_seconds", route, PROM_QUEUE_BUCKETS, r["queue_wait_ms"] / 1000.0
+            )
+        b = depth_bin(r["prompt_n"])
+        if b is None:
+            continue
+        depth = ("depth", DEPTH_LABELS[b])
+        if (
+            r["decode_tps"]
+            and r["decode_tps"] > 0
+            and (r["completion_n"] or 0) >= DEPTH_DECODE_MIN_COMPLETION
+        ):
+            labels = (depth, ("concurrency", conc_bucket(r["concurrency"])))
+            _prom_hist(c, "slotpin_decode_tokens_per_second", labels, PROM_DECODE_BUCKETS, r["decode_tps"])
+        if (
+            r["prefill_tps"]
+            and r["prefill_tps"] > 0
+            and r["cache_n"] is not None
+            and r["prompt_n"] - r["cache_n"] >= PREFILL_MIN_NEW
+        ):
+            _prom_hist(
+                c, "slotpin_prefill_tokens_per_second", (depth,), PROM_PREFILL_BUCKETS, r["prefill_tps"]
+            )
+    return c
+
+
+def _prom_fold_expiring(con, cutoff):
+    """Fold the request rows about to be pruned (ts < cutoff) into prom_base.
+
+    Called on the pruning connection right before the DELETE, inside its
+    transaction, so a row is counted exactly once: live until pruned, in the
+    base after. Any error leaves prom_base as it was (the caller's except).
+    """
+    cols = ", ".join(REQUEST_COLS)
+    cur = con.execute(f"SELECT {cols} FROM requests WHERE ts < ?", (cutoff,))
+    rows = [dict(zip(REQUEST_COLS, r, strict=True)) for r in cur]
+    if not rows:
+        return
+    con.executemany(
+        "INSERT INTO prom_base(key, v) VALUES(?, ?) "
+        "ON CONFLICT(key) DO UPDATE SET v = v + excluded.v",
+        list(_prom_row_counts(rows).items()),
+    )
+
+
+def _prom_counts():
+    """base + live rows -> Counter {sample key: value}; {} on a database error."""
+    cols = ", ".join(REQUEST_COLS)
+    try:
+        con = _db()
+        try:
+            base = {k: v for k, v in con.execute("SELECT key, v FROM prom_base")}
+            cur = con.execute(f"SELECT {cols} FROM requests")
+            rows = [dict(zip(REQUEST_COLS, r, strict=True)) for r in cur]
+        finally:
+            con.close()
+    except Exception as e:
+        print("prom counts error:", e)
+        return collections.Counter()
+    c = _prom_row_counts(rows)
+    for k, v in base.items():
+        c[k] += v
+    return c
+
+
+def _prom_gauges(st):
+    """/api/state body -> [(name, labels, value)] for the gauge and energy families."""
+    h, hv, sy = st.get("health") or {}, st.get("health_v2") or {}, st.get("system") or {}
+    en, tv = st.get("energy") or {}, st.get("temps") or {}
+
+    def mb(v):
+        return None if v is None else v * 1048576
+
+    out = [
+        ("slotpin_proxy_up", (), 1 if h.get("proxy_up") else 0),
+        ("slotpin_upstream_up", (), 1 if h.get("model_up") else 0),
+        ("slotpin_upstream_stalled", (), 1 if hv.get("upstream") == "stalled" else 0),
+        ("slotpin_slots_total", (), h.get("slots_total")),
+        ("slotpin_slots_busy", (), h.get("slots_busy")),
+        ("slotpin_last_completion_age_seconds", (), hv.get("last_completion_age_s")),
+        ("slotpin_host_memory_total_bytes", (), mb(sy.get("mem_total_mb"))),
+        ("slotpin_host_memory_free_bytes", (), mb(sy.get("mem_free_mb"))),
+        ("slotpin_host_memory_available_bytes", (), mb(sy.get("mem_avail_mb"))),
+        ("slotpin_host_swap_used_bytes", (), mb(sy.get("swap_used_mb"))),
+        ("slotpin_gpu_gtt_used_bytes", (), mb(sy.get("gtt_used_mb"))),
+        ("slotpin_power_watts", (), None if en.get("stale") else en.get("power_w")),
+        ("slotpin_energy_kwh_total", (), en.get("total_kwh")),
+    ]
+    for s in ("cpu", "gpu", "nvme"):
+        out.append(("slotpin_temperature_celsius", (("sensor", s),), tv.get(s + "_c")))
+    return [(n, labels, v) for n, labels, v in out if isinstance(v, int | float) and v == v]
+
+
+def _prom_escape(v):
+    return str(v).replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
+
+
+def _prom_num(v):
+    if isinstance(v, int) or (isinstance(v, float) and v.is_integer() and abs(v) < 1e15):
+        return str(int(v))
+    return repr(float(v))
+
+
+def _prom_line(name, labels, v):
+    lab = ",".join(f'{k}="{_prom_escape(val)}"' for k, val in labels)
+    return f"{name}{{{lab}}} {_prom_num(v)}" if lab else f"{name} {_prom_num(v)}"
+
+
+def _prom_order(labels):
+    """Sort key for label sets: depth and concurrency in bin order, the rest by text."""
+    out = []
+    for k, v in labels:
+        if k == "depth" and v in DEPTH_LABELS:
+            out.append((k, f"{DEPTH_LABELS.index(v):02d}"))
+        elif k == "concurrency":
+            o = (*CONC_BUCKETS, "?")
+            out.append((k, f"{o.index(v) if v in o else len(o):02d}"))
+        elif k != "le":
+            out.append((k, str(v)))
+    return out
+
+
+def render_metrics():
+    """GET /metrics body: Prometheus text exposition format 0.0.4."""
+    counts = _prom_counts()
+    samples = collections.defaultdict(list)  # family -> [(name, labels, value)]
+    for key, v in counts.items():
+        name, labels = json.loads(key)
+        fam = name
+        for suf in ("_bucket", "_sum", "_count"):
+            if name.endswith(suf) and name[: -len(suf)] in _PROM_HIST:
+                fam = name[: -len(suf)]
+        samples[fam].append((name, [tuple(x) for x in labels], v))
+    for name, labels, v in _prom_gauges(build_state()):
+        samples[name].append((name, list(labels), v))
+    out = []
+    for fam, typ, help_ in PROM_FAMILIES:
+        rows = samples.get(fam)
+        if not rows:
+            continue
+        out.append(f"# HELP {fam} {_prom_escape(help_)}")
+        out.append(f"# TYPE {fam} {typ}")
+        if typ == "histogram":
+            # per label set: cumulative buckets by le, then _sum, then _count
+            groups = {}
+            for name, labels, v in rows:
+                plain = tuple((k, val) for k, val in labels if k != "le")
+                groups.setdefault(plain, []).append((name, labels, v))
+            for plain in sorted(groups, key=_prom_order):
+                g = groups[plain]
+                bk = sorted(
+                    (s for s in g if s[0].endswith("_bucket")),
+                    key=lambda s: float("inf") if s[1][-1][1] == "+Inf" else float(s[1][-1][1]),
+                )
+                out.extend(_prom_line(*s) for s in bk)
+                out.extend(_prom_line(*s) for s in g if s[0].endswith("_sum"))
+                out.extend(_prom_line(*s) for s in g if s[0].endswith("_count"))
+        else:
+            out.extend(_prom_line(*s) for s in sorted(rows, key=lambda s: _prom_order(s[1])))
+    return "\n".join(out) + "\n"
+
+
+_PROM_HIST = {f for f, t, _h in PROM_FAMILIES if t == "histogram"}
+
+
 # ---------------- HTTP ----------------
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *a):
@@ -2377,6 +2656,9 @@ class Handler(BaseHTTPRequestHandler):
             elif u.path == "/api/requests":
                 code, obj = query_requests(parse_qs(u.query))
                 self._send(code, json.dumps(obj).encode(), "application/json")
+            elif u.path == "/metrics":
+                body = render_metrics().encode("utf-8")
+                self._send(200, body, "text/plain; version=0.0.4; charset=utf-8")
             elif u.path == "/" or u.path == "":
                 self._send(200, render_page().encode(), "text/html; charset=utf-8")
             else:
